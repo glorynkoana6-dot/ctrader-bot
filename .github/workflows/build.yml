@@ -1,0 +1,59 @@
+name: Build cTrader Algo
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore packages
+        run: dotnet restore Ai_Scalping.csproj
+
+      - name: Build cTrader bot
+        run: |
+          dotnet build Ai_Scalping.csproj \
+            --configuration Release \
+            -p:AlgoBuild=true \
+            -p:AlgoPublish=false \
+            -p:IncludeSource=false \
+            -p:IncludeSymbols=false
+
+      - name: Find generated algo
+        shell: bash
+        run: |
+          echo "Searching for generated .algo file..."
+
+          ALGO_FILE=$(find . -type f -name "*.algo" | head -n 1)
+
+          if [ -z "$ALGO_FILE" ]; then
+            echo "ERROR: No .algo file was generated"
+            find . -maxdepth 6 -type f | sort
+            exit 1
+          fi
+
+          echo "Found: $ALGO_FILE"
+
+          mkdir -p output
+          cp "$ALGO_FILE" output/Ai_Scalping.algo
+
+          ls -lh output/Ai_Scalping.algo
+
+      - name: Upload cTrader bot
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ai_Scalping-algo
+          path: output/Ai_Scalping.algo
+          if-no-files-found: error
