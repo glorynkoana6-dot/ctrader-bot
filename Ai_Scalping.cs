@@ -11,127 +11,50 @@ namespace cAlgo.Robots
     )]
     public class Ai_Scalping : Robot
     {
-        // =====================================================
-        // SETTINGS
-        // =====================================================
-
-        [Parameter(
-            "Volume (Lots)",
-            DefaultValue = 0.01,
-            MinValue = 0.01
-        )]
+        [Parameter("Volume (Lots)", DefaultValue = 0.01, MinValue = 0.01)]
         public double Lots { get; set; }
 
+        [Parameter("Immediate Trade On Start", DefaultValue = true)]
+        public bool ImmediateTradeOnStart { get; set; }
 
-        [Parameter(
-            "Target Trades Per Day",
-            DefaultValue = 500,
-            MinValue = 1,
-            MaxValue = 500
-        )]
+        [Parameter("Target Trades Per Day", DefaultValue = 500, MinValue = 1, MaxValue = 500)]
         public int TargetTradesPerDay { get; set; }
 
-
-        [Parameter(
-            "Maximum Open Positions",
-            DefaultValue = 5,
-            MinValue = 1,
-            MaxValue = 20
-        )]
+        [Parameter("Maximum Open Positions", DefaultValue = 5, MinValue = 1, MaxValue = 20)]
         public int MaxOpenPositions { get; set; }
 
-
-        [Parameter(
-            "Minimum Net Profit",
-            DefaultValue = 0.01,
-            MinValue = 0
-        )]
+        [Parameter("Minimum Net Profit", DefaultValue = 0.01, MinValue = 0)]
         public double MinimumNetProfit { get; set; }
 
-
-        [Parameter(
-            "Maximum Spread (Pips)",
-            DefaultValue = 2.0,
-            MinValue = 0.1
-        )]
+        [Parameter("Maximum Spread (Pips)", DefaultValue = 2.0, MinValue = 0.1)]
         public double MaximumSpreadPips { get; set; }
 
-
-        [Parameter(
-            "EMA Fast",
-            DefaultValue = 9,
-            MinValue = 2
-        )]
+        [Parameter("EMA Fast", DefaultValue = 9, MinValue = 2)]
         public int FastEmaPeriod { get; set; }
 
-
-        [Parameter(
-            "EMA Slow",
-            DefaultValue = 21,
-            MinValue = 3
-        )]
+        [Parameter("EMA Slow", DefaultValue = 21, MinValue = 3)]
         public int SlowEmaPeriod { get; set; }
 
-
-        [Parameter(
-            "RSI Period",
-            DefaultValue = 7,
-            MinValue = 2
-        )]
+        [Parameter("RSI Period", DefaultValue = 7, MinValue = 2)]
         public int RsiPeriod { get; set; }
 
-
-        [Parameter(
-            "ATR Period",
-            DefaultValue = 14,
-            MinValue = 2
-        )]
+        [Parameter("ATR Period", DefaultValue = 14, MinValue = 2)]
         public int AtrPeriod { get; set; }
 
-
-        [Parameter(
-            "ATR Stop Multiplier",
-            DefaultValue = 1.0,
-            MinValue = 0.2
-        )]
+        [Parameter("ATR Stop Multiplier", DefaultValue = 1.0, MinValue = 0.2)]
         public double AtrStopMultiplier { get; set; }
 
-
-        [Parameter(
-            "Minimum SL Pips",
-            DefaultValue = 3.0,
-            MinValue = 1
-        )]
+        [Parameter("Minimum SL Pips", DefaultValue = 3.0, MinValue = 1)]
         public double MinimumStopLossPips { get; set; }
 
+        [Parameter("Minimum Signal Score", DefaultValue = 3, MinValue = 1, MaxValue = 8)]
+        public int MinimumSignalScore { get; set; }
 
-        [Parameter(
-            "Normal Minimum Score",
-            DefaultValue = 3,
-            MinValue = 1,
-            MaxValue = 8
-        )]
-        public int NormalMinimumScore { get; set; }
-
-
-        [Parameter(
-            "Maximum Hold Minutes",
-            DefaultValue = 12,
-            MinValue = 1
-        )]
+        [Parameter("Maximum Hold Minutes", DefaultValue = 12, MinValue = 1)]
         public int MaximumHoldMinutes { get; set; }
 
-
-        [Parameter(
-            "Force Catch-Up",
-            DefaultValue = true
-        )]
-        public bool ForceCatchUp { get; set; }
-
-
-        // =====================================================
-        // VARIABLES
-        // =====================================================
+        [Parameter("Force Trade Each M1 Candle", DefaultValue = true)]
+        public bool ForceTradeEachCandle { get; set; }
 
         private Bars _m1Bars;
 
@@ -139,32 +62,22 @@ namespace cAlgo.Robots
         private ExponentialMovingAverage _slowEma;
 
         private RelativeStrengthIndex _rsi;
-
         private AverageTrueRange _atr;
 
         private int _lastM1BarCount;
 
         private int _tradesToday;
-
         private DateTime _tradeDay;
 
-        private const string BotLabel =
-            "AI_SCALPING_M1_500";
+        private const string BotLabel = "AI_SCALPING_M1_500";
 
-
-        // =====================================================
-        // START
-        // =====================================================
 
         protected override void OnStart()
         {
-            // Always use M1 data even if the cBot instance
-            // is accidentally attached to H1/M5/etc.
             _m1Bars = MarketData.GetBars(
                 TimeFrame.Minute,
                 SymbolName
             );
-
 
             _fastEma =
                 Indicators.ExponentialMovingAverage(
@@ -172,20 +85,17 @@ namespace cAlgo.Robots
                     FastEmaPeriod
                 );
 
-
             _slowEma =
                 Indicators.ExponentialMovingAverage(
                     _m1Bars.ClosePrices,
                     SlowEmaPeriod
                 );
 
-
             _rsi =
                 Indicators.RelativeStrengthIndex(
                     _m1Bars.ClosePrices,
                     RsiPeriod
                 );
-
 
             _atr =
                 Indicators.AverageTrueRange(
@@ -194,120 +104,69 @@ namespace cAlgo.Robots
                     MovingAverageType.Exponential
                 );
 
-
             _lastM1BarCount = _m1Bars.Count;
 
             _tradeDay = Server.Time.Date;
-
             _tradesToday = 0;
 
-
-            // Check positions every second
             Timer.Start(1);
 
+            Print("======================================");
+            Print("AI SCALPING STARTED");
+            Print("SYMBOL: {0}", SymbolName);
+            Print("TIMEFRAME: M1");
+            Print("TARGET: {0} trades/day", TargetTradesPerDay);
+            Print("======================================");
 
-            Print("========================================");
+            if (ImmediateTradeOnStart)
+            {
+                Print("ANALYSING IMMEDIATE STARTUP TRADE...");
 
-            Print("AI SCALPING M1 500 STARTED");
-
-            Print("Symbol: {0}", SymbolName);
-
-            Print(
-                "Daily Target: {0}",
-                TargetTradesPerDay
-            );
-
-            Print(
-                "Maximum Open Trades: {0}",
-                MaxOpenPositions
-            );
-
-            Print(
-                "Minimum Net Profit: {0}",
-                MinimumNetProfit
-            );
-
-            Print("========================================");
+                TryImmediateTrade();
+            }
         }
 
-
-        // =====================================================
-        // TIMER
-        // =====================================================
 
         protected override void OnTimer()
         {
             ResetDailyCounter();
 
-            ManageOpenPositions();
+            ManagePositions();
 
             DetectNewM1Candle();
         }
 
-
-        // =====================================================
-        // DETECT NEW M1 CANDLE
-        // =====================================================
 
         private void DetectNewM1Candle()
         {
             if (_m1Bars.Count <= _lastM1BarCount)
                 return;
 
-
             _lastM1BarCount = _m1Bars.Count;
 
-
-            // A new M1 candle has opened.
-            // Analyse the candle that just closed.
-            AnalyseClosedM1Candle();
+            AnalyseAndTrade(false);
         }
 
 
-        // =====================================================
-        // ANALYSE EACH COMPLETED M1 CANDLE
-        // =====================================================
+        private void TryImmediateTrade()
+        {
+            if (_m1Bars.Count < SlowEmaPeriod + 20)
+            {
+                Print("NOT ENOUGH DATA FOR IMMEDIATE TRADE");
+                return;
+            }
 
-        private void AnalyseClosedM1Candle()
+            AnalyseAndTrade(true);
+        }
+
+
+        private void AnalyseAndTrade(bool immediate)
         {
             if (_tradesToday >= TargetTradesPerDay)
             {
-                Print("DAILY TARGET REACHED");
+                Print("DAILY TRADE LIMIT REACHED");
                 return;
             }
-
-
-            if (_m1Bars.Count <
-                SlowEmaPeriod + 20)
-            {
-                return;
-            }
-
-
-            // -------------------------------------------------
-            // SPREAD FILTER
-            // -------------------------------------------------
-
-            double spreadPips =
-                (Symbol.Ask - Symbol.Bid)
-                / Symbol.PipSize;
-
-
-            if (spreadPips >
-                MaximumSpreadPips)
-            {
-                Print(
-                    "SKIP | Spread {0:F2} pips",
-                    spreadPips
-                );
-
-                return;
-            }
-
-
-            // -------------------------------------------------
-            // OPEN POSITION LIMIT
-            // -------------------------------------------------
 
             var positions =
                 Positions.FindAll(
@@ -315,19 +174,29 @@ namespace cAlgo.Robots
                     SymbolName
                 );
 
+            if (positions.Length >= MaxOpenPositions)
+            {
+                Print("MAXIMUM OPEN POSITIONS REACHED");
+                return;
+            }
 
-            if (positions.Length >=
-                MaxOpenPositions)
+
+            double spreadPips =
+                (Symbol.Ask - Symbol.Bid)
+                / Symbol.PipSize;
+
+
+            if (spreadPips > MaximumSpreadPips)
             {
                 Print(
-                    "SKIP | Maximum open positions"
+                    "SPREAD TOO HIGH: {0:F2} pips",
+                    spreadPips
                 );
 
                 return;
             }
 
 
-            // Last completed M1 candle
             int i = _m1Bars.Count - 2;
 
 
@@ -348,10 +217,10 @@ namespace cAlgo.Robots
                 _m1Bars.ClosePrices[i - 1];
 
 
-            double fastEma =
+            double fast =
                 _fastEma.Result[i];
 
-            double slowEma =
+            double slow =
                 _slowEma.Result[i];
 
             double rsi =
@@ -361,40 +230,35 @@ namespace cAlgo.Robots
                 _atr.Result[i];
 
 
-            // =================================================
-            // SCORE BUY / SELL
-            // =================================================
-
             int buyScore = 0;
-
             int sellScore = 0;
 
 
-            // -------------------------------------------------
-            // 1. EMA TREND
-            // -------------------------------------------------
+            // ===============================================
+            // EMA TREND
+            // ===============================================
 
-            if (fastEma > slowEma)
+            if (fast > slow)
                 buyScore += 2;
 
-            if (fastEma < slowEma)
+            if (fast < slow)
                 sellScore += 2;
 
 
-            // -------------------------------------------------
-            // 2. PRICE VS FAST EMA
-            // -------------------------------------------------
+            // ===============================================
+            // PRICE VS EMA
+            // ===============================================
 
-            if (close > fastEma)
+            if (close > fast)
                 buyScore++;
 
-            if (close < fastEma)
+            if (close < fast)
                 sellScore++;
 
 
-            // -------------------------------------------------
-            // 3. CANDLE DIRECTION
-            // -------------------------------------------------
+            // ===============================================
+            // CANDLE DIRECTION
+            // ===============================================
 
             if (close > open)
                 buyScore++;
@@ -403,9 +267,9 @@ namespace cAlgo.Robots
                 sellScore++;
 
 
-            // -------------------------------------------------
-            // 4. SHORT-TERM MOMENTUM
-            // -------------------------------------------------
+            // ===============================================
+            // MOMENTUM
+            // ===============================================
 
             if (close > previousClose)
                 buyScore++;
@@ -414,25 +278,24 @@ namespace cAlgo.Robots
                 sellScore++;
 
 
-            // -------------------------------------------------
-            // 5. STRONG CANDLE
-            // -------------------------------------------------
+            // ===============================================
+            // STRONG CANDLE
+            // ===============================================
 
-            double candleRange =
-                high - low;
+            double range = high - low;
 
             double body =
                 Math.Abs(close - open);
 
 
-            if (candleRange > 0)
+            if (range > 0)
             {
-                double bodyStrength =
-                    body / candleRange;
+                double strength =
+                    body / range;
 
 
                 if (
-                    bodyStrength >= 0.55 &&
+                    strength >= 0.55 &&
                     close > open
                 )
                 {
@@ -441,7 +304,7 @@ namespace cAlgo.Robots
 
 
                 if (
-                    bodyStrength >= 0.55 &&
+                    strength >= 0.55 &&
                     close < open
                 )
                 {
@@ -450,31 +313,28 @@ namespace cAlgo.Robots
             }
 
 
-            // -------------------------------------------------
-            // 6. RSI MOMENTUM
-            // -------------------------------------------------
+            // ===============================================
+            // RSI
+            // ===============================================
 
-            if (
-                rsi >= 52 &&
-                rsi <= 78
-            )
-            {
+            if (rsi > 50)
                 buyScore++;
-            }
 
-
-            if (
-                rsi <= 48 &&
-                rsi >= 22
-            )
-            {
+            if (rsi < 50)
                 sellScore++;
-            }
 
 
-            // -------------------------------------------------
-            // 7. MICRO BREAKOUT
-            // -------------------------------------------------
+            if (rsi >= 55 && rsi <= 75)
+                buyScore++;
+
+
+            if (rsi <= 45 && rsi >= 25)
+                sellScore++;
+
+
+            // ===============================================
+            // BREAKOUT
+            // ===============================================
 
             double recentHigh =
                 HighestHigh(
@@ -498,33 +358,19 @@ namespace cAlgo.Robots
                 sellScore += 2;
 
 
-            // =================================================
-            // ADAPTIVE TRADE FREQUENCY
-            // =================================================
-
-            int requiredScore =
-                GetRequiredScore();
-
-
             Print(
-                "M1 | BUY {0} | SELL {1} | Required {2} | Trades {3}/{4}",
+                "M1 SIGNAL | BUY {0} | SELL {1} | RSI {2:F1}",
                 buyScore,
                 sellScore,
-                requiredScore,
-                _tradesToday,
-                TargetTradesPerDay
+                rsi
             );
 
-
-            // =================================================
-            // TRADE DIRECTION
-            // =================================================
 
             TradeType? direction = null;
 
 
             if (
-                buyScore >= requiredScore &&
+                buyScore >= MinimumSignalScore &&
                 buyScore > sellScore
             )
             {
@@ -533,7 +379,7 @@ namespace cAlgo.Robots
 
 
             else if (
-                sellScore >= requiredScore &&
+                sellScore >= MinimumSignalScore &&
                 sellScore > buyScore
             )
             {
@@ -541,17 +387,19 @@ namespace cAlgo.Robots
             }
 
 
-            // =================================================
-            // CATCH-UP MODE
+            // ===============================================
+            // FORCE DIRECTION
             //
-            // If the bot is behind the pace needed for
-            // 500 trades/day, become more aggressive.
-            // =================================================
+            // Used for immediate startup and aggressive
+            // M1 entry mode.
+            // ===============================================
 
             if (
                 direction == null &&
-                ForceCatchUp &&
-                IsBehindDailyTarget()
+                (
+                    immediate ||
+                    ForceTradeEachCandle
+                )
             )
             {
                 if (buyScore > sellScore)
@@ -568,17 +416,11 @@ namespace cAlgo.Robots
 
                 else
                 {
-                    // Tie-break using candle direction
                     direction =
                         close >= open
                         ? TradeType.Buy
                         : TradeType.Sell;
                 }
-
-
-                Print(
-                    "CATCH-UP ENTRY"
-                );
             }
 
 
@@ -589,6 +431,15 @@ namespace cAlgo.Robots
             }
 
 
+            if (immediate)
+            {
+                Print(
+                    "IMMEDIATE START TRADE: {0}",
+                    direction.Value
+                );
+            }
+
+
             OpenTrade(
                 direction.Value,
                 atr
@@ -596,82 +447,24 @@ namespace cAlgo.Robots
         }
 
 
-        // =====================================================
-        // REQUIRED SCORE
-        // =====================================================
-
-        private int GetRequiredScore()
-        {
-            if (IsFarBehindTarget())
-                return 1;
-
-
-            if (IsBehindDailyTarget())
-                return 2;
-
-
-            return NormalMinimumScore;
-        }
-
-
-        // =====================================================
-        // DAILY PACE
-        // =====================================================
-
-        private bool IsBehindDailyTarget()
-        {
-            double minutesPassed =
-                Server.Time.TimeOfDay.TotalMinutes;
-
-
-            double expectedTrades =
-                TargetTradesPerDay
-                * (
-                    minutesPassed
-                    / 1440.0
-                );
-
-
-            return
-                _tradesToday <
-                expectedTrades - 3;
-        }
-
-
-        private bool IsFarBehindTarget()
-        {
-            double minutesPassed =
-                Server.Time.TimeOfDay.TotalMinutes;
-
-
-            double expectedTrades =
-                TargetTradesPerDay
-                * (
-                    minutesPassed
-                    / 1440.0
-                );
-
-
-            return
-                _tradesToday <
-                expectedTrades - 15;
-        }
-
-
-        // =====================================================
-        // OPEN POSITION
-        // =====================================================
-
         private void OpenTrade(
             TradeType tradeType,
             double atr
         )
         {
-            if (_tradesToday >=
-                TargetTradesPerDay)
-            {
+            if (_tradesToday >= TargetTradesPerDay)
                 return;
-            }
+
+
+            var positions =
+                Positions.FindAll(
+                    BotLabel,
+                    SymbolName
+                );
+
+
+            if (positions.Length >= MaxOpenPositions)
+                return;
 
 
             double volume =
@@ -687,30 +480,20 @@ namespace cAlgo.Robots
                 );
 
 
-            if (
-                volume <
-                Symbol.VolumeInUnitsMin
-            )
+            if (volume < Symbol.VolumeInUnitsMin)
             {
-                Print(
-                    "Volume below broker minimum"
-                );
-
+                Print("VOLUME BELOW BROKER MINIMUM");
                 return;
             }
 
-
-            // -------------------------------------------------
-            // ATR STOP LOSS
-            // -------------------------------------------------
 
             double atrPips =
                 atr / Symbol.PipSize;
 
 
             double stopLossPips =
-                atrPips
-                * AtrStopMultiplier;
+                atrPips *
+                AtrStopMultiplier;
 
 
             if (
@@ -722,10 +505,6 @@ namespace cAlgo.Robots
                     MinimumStopLossPips;
             }
 
-
-            // -------------------------------------------------
-            // EXECUTE
-            // -------------------------------------------------
 
             var result =
                 ExecuteMarketOrder(
@@ -743,39 +522,30 @@ namespace cAlgo.Robots
                 _tradesToday++;
 
 
-                Print(
-                    "================================"
-                );
-
+                Print("================================");
 
                 Print(
-                    "OPENED: {0}",
+                    "TRADE OPENED: {0}",
                     tradeType
                 );
 
-
                 Print(
-                    "Entry: {0}",
+                    "ENTRY: {0}",
                     result.Position.EntryPrice
                 );
 
-
                 Print(
-                    "SL: {0:F1} pips",
+                    "STOP: {0:F1} pips",
                     stopLossPips
                 );
 
-
                 Print(
-                    "TRADE: {0}/{1}",
+                    "TRADE COUNT: {0}/{1}",
                     _tradesToday,
                     TargetTradesPerDay
                 );
 
-
-                Print(
-                    "================================"
-                );
+                Print("================================");
             }
             else
             {
@@ -787,11 +557,7 @@ namespace cAlgo.Robots
         }
 
 
-        // =====================================================
-        // MANAGE OPEN TRADES
-        // =====================================================
-
-        private void ManageOpenPositions()
+        private void ManagePositions()
         {
             var positions =
                 Positions.FindAll(
@@ -800,14 +566,11 @@ namespace cAlgo.Robots
                 );
 
 
-            foreach (
-                var position
-                in positions
-            )
+            foreach (var position in positions)
             {
-                // ---------------------------------------------
-                // CLOSE AT POSITIVE NET PROFIT
-                // ---------------------------------------------
+                // ===========================================
+                // CLOSE AS SOON AS NET PROFIT IS POSITIVE
+                // ===========================================
 
                 if (
                     position.NetProfit >=
@@ -824,12 +587,10 @@ namespace cAlgo.Robots
                         );
 
 
-                    if (
-                        result.IsSuccessful
-                    )
+                    if (result.IsSuccessful)
                     {
                         Print(
-                            "PROFIT CLOSE | {0:F2}",
+                            "PROFIT CLOSED: {0:F2}",
                             profit
                         );
                     }
@@ -839,14 +600,14 @@ namespace cAlgo.Robots
                 }
 
 
-                // ---------------------------------------------
-                // DON'T ALLOW POSITIONS TO BLOCK THE BOT FOREVER
-                // ---------------------------------------------
+                // ===========================================
+                // MAXIMUM HOLD TIME
+                // ===========================================
 
                 double minutesOpen =
                     (
-                        Server.Time
-                        - position.EntryTime
+                        Server.Time -
+                        position.EntryTime
                     )
                     .TotalMinutes;
 
@@ -856,7 +617,7 @@ namespace cAlgo.Robots
                     MaximumHoldMinutes
                 )
                 {
-                    double profit =
+                    double resultValue =
                         position.NetProfit;
 
 
@@ -866,13 +627,11 @@ namespace cAlgo.Robots
                         );
 
 
-                    if (
-                        result.IsSuccessful
-                    )
+                    if (result.IsSuccessful)
                     {
                         Print(
-                            "TIME EXIT | P/L {0:F2}",
-                            profit
+                            "TIME EXIT: {0:F2}",
+                            resultValue
                         );
                     }
                 }
@@ -880,15 +639,15 @@ namespace cAlgo.Robots
         }
 
 
-        // =====================================================
-        // HIGHEST HIGH
-        // =====================================================
-
         private double HighestHigh(
             int start,
             int end
         )
         {
+            if (start < 0)
+                start = 0;
+
+
             double highest =
                 double.MinValue;
 
@@ -900,8 +659,8 @@ namespace cAlgo.Robots
             )
             {
                 if (
-                    _m1Bars.HighPrices[x]
-                    > highest
+                    _m1Bars.HighPrices[x] >
+                    highest
                 )
                 {
                     highest =
@@ -914,15 +673,15 @@ namespace cAlgo.Robots
         }
 
 
-        // =====================================================
-        // LOWEST LOW
-        // =====================================================
-
         private double LowestLow(
             int start,
             int end
         )
         {
+            if (start < 0)
+                start = 0;
+
+
             double lowest =
                 double.MaxValue;
 
@@ -934,8 +693,8 @@ namespace cAlgo.Robots
             )
             {
                 if (
-                    _m1Bars.LowPrices[x]
-                    < lowest
+                    _m1Bars.LowPrices[x] <
+                    lowest
                 )
                 {
                     lowest =
@@ -947,10 +706,6 @@ namespace cAlgo.Robots
             return lowest;
         }
 
-
-        // =====================================================
-        // RESET DAILY COUNTER
-        // =====================================================
 
         private void ResetDailyCounter()
         {
@@ -971,29 +726,17 @@ namespace cAlgo.Robots
 
 
             Print(
-                "================================"
-            );
-
-            Print(
-                "NEW DAY - TRADE COUNTER RESET"
-            );
-
-            Print(
-                "================================"
+                "DAILY TRADE COUNTER RESET"
             );
         }
 
-
-        // =====================================================
-        // STOP
-        // =====================================================
 
         protected override void OnStop()
         {
             Timer.Stop();
 
             Print(
-                "AI SCALPING M1 500 STOPPED"
+                "AI SCALPING STOPPED"
             );
         }
     }
