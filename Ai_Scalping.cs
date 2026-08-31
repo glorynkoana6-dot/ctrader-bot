@@ -1,83 +1,253 @@
 using System;
 using System.Linq;
 using cAlgo.API;
+using cAlgo.API.Indicators;
 
 namespace cAlgo.Robots
 {
-    [Robot(
-        TimeZone = TimeZones.UTC,
-        AccessRights = AccessRights.None
-    )]
-    public class Ai_Scalping : Robot
+    [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
+    public class MKAYFXM1Scalper : Robot
     {
+        // =====================================================
+        // SETTINGS
+        // =====================================================
+
         [Parameter("Volume (Lots)", DefaultValue = 0.01, MinValue = 0.01)]
         public double Lots { get; set; }
 
-        [Parameter("Seconds Between Entries", DefaultValue = 170, MinValue = 10)]
-        public int TradeIntervalSeconds { get; set; }
+        [Parameter("EMA Fast", DefaultValue = 20)]
+        public int FastEmaPeriod { get; set; }
 
-        [Parameter("Maximum Open Trades", DefaultValue = 3, MinValue = 1)]
-        public int MaximumOpenTrades { get; set; }
+        [Parameter("EMA Slow", DefaultValue = 50)]
+        public int SlowEmaPeriod { get; set; }
 
-        [Parameter("Maximum Daily Entries", DefaultValue = 509, MinValue = 1)]
-        public int MaximumDailyEntries { get; set; }
+        [Parameter("RSI Period", DefaultValue = 14)]
+        public int RsiPeriod { get; set; }
 
-        [Parameter("Close Profit", DefaultValue = 0.01, MinValue = 0)]
-        public double CloseProfit { get; set; }
+        [Parameter("ATR Period", DefaultValue = 14)]
+        public int AtrPeriod { get; set; }
 
-        [Parameter("Stop Loss (Pips)", DefaultValue = 10, MinValue = 1)]
-        public double StopLossPips { get; set; }
+        [Parameter("ATR SL Multiplier", DefaultValue = 1.5)]
+        public double AtrMultiplier { get; set; }
 
-        private const string Label = "AI_SCALPING";
+        [Parameter("Minimum Profit", DefaultValue = 0.01)]
+        public double MinimumProfit { get; set; }
 
-        private DateTime _lastEntryTime;
+        [Parameter("Max Open Positions", DefaultValue = 3)]
+        public int MaxOpenPositions { get; set; }
+
+        [Parameter("Max Trades Per Day", DefaultValue = 509)]
+        public int MaxTradesPerDay { get; set; }
+
+        [Parameter("Cooldown Seconds", DefaultValue = 60)]
+        public int CooldownSeconds { get; set; }
+
+
+        // =====================================================
+        // VARIABLES
+        // =====================================================
+
+        private ExponentialMovingAverage _ema20;
+        private ExponentialMovingAverage _ema50;
+        private RelativeStrengthIndex _rsi;
+        private AverageTrueRange _atr;
+
+        private DateTime _lastTradeTime = DateTime.MinValue;
+
+        private int _tradesToday = 0;
         private DateTime _tradeDay;
-        private int _dailyEntries;
+
+        private const string BotLabel = "MKAYFX_M1";
+
+
+        // =====================================================
+        // START
+        // =====================================================
 
         protected override void OnStart()
         {
+            _ema20 = Indicators.ExponentialMovingAverage(
+                Bars.ClosePrices,
+                FastEmaPeriod
+            );
+
+            _ema50 = Indicators.ExponentialMovingAverage(
+                Bars.ClosePrices,
+                SlowEmaPeriod
+            );
+
+            _rsi = Indicators.RelativeStrengthIndex(
+                Bars.ClosePrices,
+                RsiPeriod
+            );
+
+            _atr = Indicators.AverageTrueRange(
+                AtrPeriod,
+                MovingAverageType.Exponential
+            );
+
             _tradeDay = Server.Time.Date;
 
-            _lastEntryTime =
-                Server.Time.AddSeconds(-TradeIntervalSeconds);
-
-            _dailyEntries = 0;
-
+            // Check profit every second
             Timer.Start(1);
 
-            Print("AI Scalping started");
+            Print("====================================");
+            Print("MKAYFX M1 SCALPER STARTED");
+            Print("Strategy: EMA20 + EMA50 + RSI + Pullback");
+            Print("Timeframe: 1 MINUTE");
             Print("Symbol: {0}", SymbolName);
+            Print("Lots: {0}", Lots);
+            Print("Max Positions: {0}", MaxOpenPositions);
+            Print("====================================");
         }
 
-        protected override void OnTimer()
+
+        // =====================================================
+        // NEW 1-MINUTE BAR
+        // =====================================================
+
+        protected override void OnBar()
         {
             ResetDailyCounter();
 
-            CloseProfitableTrades();
-
-            if (_dailyEntries >= MaximumDailyEntries)
+            if (Bars.Count < 60)
                 return;
 
-            if ((Server.Time - _lastEntryTime).TotalSeconds <
-                TradeIntervalSeconds)
+            if (_tradesToday >= MaxTradesPerDay)
                 return;
 
-            var openTrades = Positions
-                .Where(p =>
-                    p.SymbolName == SymbolName &&
-                    p.Label == Label)
-                .ToArray();
-
-            if (openTrades.Length >= MaximumOpenTrades)
+            if ((Server.Time - _lastTradeTime).TotalSeconds < CooldownSeconds)
                 return;
 
-            OpenTrade();
+            var positions = Positions.FindAll(BotLabel, SymbolName);
+
+            if (positions.Length >= MaxOpenPositions)
+                return;
+
+
+            // Last completed candle
+            int index = Bars.Count - 2;
+
+            double open = Bars.OpenPrices[index];
+            double high = Bars.HighPrices[index];
+            double low = Bars.LowPrices[index];
+            double close = Bars.ClosePrices[index];
+
+            double ema20 = _ema20.Result[index];
+            double ema50 = _ema50.Result[index];
+
+            double rsi = _rsi.Result[index];
+            double atr = _atr.Result[index];
+
+
+            // =================================================
+            // CANDLE DIRECTION
+            // =================================================
+
+            bool bullishCandle = close > open;
+            bool bearishCandle = close < open;
+
+
+            // =================================================
+            // TREND
+            // =================================================
+
+            bool bullishTrend =
+                ema20 > ema50 &&
+                close > ema20;
+
+            bool bearishTrend =
+                ema20 < ema50 &&
+                close < ema20;
+
+
+            // =================================================
+            // EMA20 PULLBACK
+            // =================================================
+
+            bool bullishPullback =
+                low <= ema20 &&
+                close > ema20;
+
+            bool bearishPullback =
+                high >= ema20 &&
+                close < ema20;
+
+
+            // =================================================
+            // RSI FILTER
+            // =================================================
+
+            bool buyRsi =
+                rsi >= 52 &&
+                rsi <= 68;
+
+            bool sellRsi =
+                rsi >= 32 &&
+                rsi <= 48;
+
+
+            // =================================================
+            // BUY SETUP
+            // =================================================
+
+            bool buySignal =
+                bullishTrend &&
+                bullishPullback &&
+                bullishCandle &&
+                buyRsi;
+
+
+            // =================================================
+            // SELL SETUP
+            // =================================================
+
+            bool sellSignal =
+                bearishTrend &&
+                bearishPullback &&
+                bearishCandle &&
+                sellRsi;
+
+
+            Print(
+                "M1 | Close: {0} | EMA20: {1} | EMA50: {2} | RSI: {3:F2}",
+                close,
+                ema20,
+                ema50,
+                rsi
+            );
+
+
+            if (buySignal)
+            {
+                OpenTrade(
+                    TradeType.Buy,
+                    atr
+                );
+            }
+            else if (sellSignal)
+            {
+                OpenTrade(
+                    TradeType.Sell,
+                    atr
+                );
+            }
+            else
+            {
+                Print("NO TRADE - Waiting for M1 setup");
+            }
         }
 
-        private void OpenTrade()
-        {
-            TradeType direction = GetDirection();
 
+        // =====================================================
+        // OPEN TRADE
+        // =====================================================
+
+        private void OpenTrade(
+            TradeType tradeType,
+            double atr
+        )
+        {
             double volume =
                 Symbol.QuantityToVolumeInUnits(Lots);
 
@@ -86,106 +256,123 @@ namespace cAlgo.Robots
                 RoundingMode.Down
             );
 
-            if (volume < Symbol.VolumeInUnitsMin)
-            {
-                Print("Volume below broker minimum.");
-                return;
-            }
+
+            // ATR converted into pips
+            double atrPips =
+                atr / Symbol.PipSize;
+
+            double stopLossPips =
+                atrPips * AtrMultiplier;
+
+
+            // Safety minimum
+            if (stopLossPips < 2)
+                stopLossPips = 2;
+
 
             var result = ExecuteMarketOrder(
-                direction,
+                tradeType,
                 SymbolName,
                 volume,
-                Label,
-                StopLossPips,
+                BotLabel,
+                stopLossPips,
                 null
             );
 
+
             if (result.IsSuccessful)
             {
-                _lastEntryTime = Server.Time;
-                _dailyEntries++;
+                _lastTradeTime = Server.Time;
+                _tradesToday++;
+
+                Print("====================================");
 
                 Print(
-                    "OPENED {0} | Trade {1}/{2} | Entry {3}",
-                    direction,
-                    _dailyEntries,
-                    MaximumDailyEntries,
+                    "TRADE OPENED: {0}",
+                    tradeType
+                );
+
+                Print(
+                    "Entry: {0}",
                     result.Position.EntryPrice
                 );
+
+                Print(
+                    "SL: {0:F1} pips",
+                    stopLossPips
+                );
+
+                Print(
+                    "Trades Today: {0}",
+                    _tradesToday
+                );
+
+                Print("====================================");
             }
             else
             {
                 Print(
-                    "Order failed: {0}",
+                    "ORDER FAILED: {0}",
                     result.Error
                 );
             }
         }
 
-        private TradeType GetDirection()
+
+        // =====================================================
+        // PROFIT CLOSER
+        // =====================================================
+
+        protected override void OnTimer()
         {
-            if (Bars.Count < 3)
-                return TradeType.Buy;
+            var positions =
+                Positions.FindAll(
+                    BotLabel,
+                    SymbolName
+                );
 
-            var candle = Bars.Last(1);
 
-            if (candle.Close > candle.Open)
-                return TradeType.Buy;
-
-            if (candle.Close < candle.Open)
-                return TradeType.Sell;
-
-            if (Symbol.Bid >= candle.Close)
-                return TradeType.Buy;
-
-            return TradeType.Sell;
-        }
-
-        private void CloseProfitableTrades()
-        {
-            var trades = Positions
-                .Where(p =>
-                    p.SymbolName == SymbolName &&
-                    p.Label == Label)
-                .ToArray();
-
-            foreach (var position in trades)
+            foreach (var position in positions)
             {
-                if (position.NetProfit >= CloseProfit)
+                if (position.NetProfit >= MinimumProfit)
                 {
-                    double profit = position.NetProfit;
+                    Print(
+                        "CLOSING {0} | PROFIT: {1}",
+                        position.TradeType,
+                        position.NetProfit
+                    );
 
-                    var result =
-                        ClosePosition(position);
-
-                    if (result.IsSuccessful)
-                    {
-                        Print(
-                            "CLOSED PROFIT | {0}",
-                            profit
-                        );
-                    }
+                    ClosePosition(position);
                 }
             }
         }
 
+
+        // =====================================================
+        // RESET TRADE COUNTER EACH DAY
+        // =====================================================
+
         private void ResetDailyCounter()
         {
-            if (Server.Time.Date == _tradeDay)
-                return;
+            if (Server.Time.Date != _tradeDay)
+            {
+                _tradeDay = Server.Time.Date;
+                _tradesToday = 0;
 
-            _tradeDay = Server.Time.Date;
-            _dailyEntries = 0;
-
-            Print("Daily trade counter reset.");
+                Print("DAILY TRADE COUNTER RESET");
+            }
         }
+
+
+        // =====================================================
+        // STOP
+        // =====================================================
 
         protected override void OnStop()
         {
             Timer.Stop();
 
-            Print("AI Scalping stopped.");
+            Print("MKAYFX M1 SCALPER STOPPED");
         }
     }
 }
