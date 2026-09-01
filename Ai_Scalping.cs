@@ -1,2906 +1,465 @@
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using cAlgo.API;
+using cAlgo.API.Indicators;
 
 namespace cAlgo.Robots
 {
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-    public class XAUUSD_MTF_Analysis_Bot : Robot
+    public class GoldAITradingBot : Robot
     {
-        // =====================================================
-        // SETTINGS
-        // =====================================================
-
         [Parameter("Enable Real Trading", DefaultValue = false)]
         public bool EnableRealTrading { get; set; }
 
         [Parameter("Volume In Units", DefaultValue = 1000, MinValue = 1)]
         public double VolumeInUnits { get; set; }
 
-        [Parameter("Risk Reward", DefaultValue = 3.0, MinValue = 0.5)]
-        public double RiskReward { get; set; }
-
-        [Parameter("Minimum Signal Score", DefaultValue = 70)]
+        [Parameter("Minimum Signal Score", DefaultValue = 70, MinValue = 50, MaxValue = 100)]
         public int MinimumSignalScore { get; set; }
 
-        [Parameter("Ranging Minimum Score", DefaultValue = 80)]
-        public int RangingMinScore { get; set; }
+        [Parameter("Risk Reward", DefaultValue = 2.0, MinValue = 0.5)]
+        public double RiskReward { get; set; }
 
-        [Parameter("SL ATR Multiplier", DefaultValue = 1.0)]
-        public double SlAtrMultiplier { get; set; }
+        [Parameter("SL ATR Multiplier", DefaultValue = 1.0, MinValue = 0.2)]
+        public double StopAtrMultiplier { get; set; }
 
-        [Parameter("Maximum Spread Pips", DefaultValue = 50)]
+        [Parameter("Maximum Spread Pips", DefaultValue = 50, MinValue = 1)]
         public double MaximumSpreadPips { get; set; }
 
-        [Parameter("One Position At A Time", DefaultValue = true)]
-        public bool OnePositionAtATime { get; set; }
-
-        [Parameter("Analyse Immediately", DefaultValue = true)]
-        public bool AnalyseImmediately { get; set; }
-
-
-        // =====================================================
-        // TRAILING STOP
-        // =====================================================
+        [Parameter("One Trade At A Time", DefaultValue = true)]
+        public bool OneTradeAtATime { get; set; }
 
         [Parameter("Enable Trailing Stop", DefaultValue = true)]
         public bool EnableTrailingStop { get; set; }
 
-        [Parameter("Breakeven Trigger R", DefaultValue = 1.0, MinValue = 0.1)]
+        [Parameter("Breakeven Trigger R", DefaultValue = 1.0, MinValue = 0.2)]
         public double BreakevenTriggerR { get; set; }
 
-        [Parameter("Trailing ATR Multiplier", DefaultValue = 1.0, MinValue = 0.1)]
+        [Parameter("Trailing ATR Multiplier", DefaultValue = 1.0, MinValue = 0.2)]
         public double TrailingAtrMultiplier { get; set; }
 
-        [Parameter("Breakeven Extra Pips", DefaultValue = 2.0, MinValue = 0)]
-        public double BreakevenExtraPips { get; set; }
-
-
-        // =====================================================
-        // STATE
-        // =====================================================
-
-        private const string Label = "XAUUSD_MTF_AI";
+        private const string BotLabel = "GOLD_AI_BOT";
 
         private Bars _m5;
         private Bars _m15;
         private Bars _h1;
 
-        private DateTime _lastTradeCandle = DateTime.MinValue;
+        private ExponentialMovingAverage _m5Ema20;
+        private ExponentialMovingAverage _m5Ema50;
+        private ExponentialMovingAverage _m15Ema20;
+        private ExponentialMovingAverage _m15Ema50;
+        private ExponentialMovingAverage _h1Ema50;
+        private ExponentialMovingAverage _h1Ema200;
 
-        private readonly Dictionary<long, double> _initialRisk =
-            new Dictionary<long, double>();
+        private RelativeStrengthIndex _m5Rsi;
+        private MacdHistogram _m5Macd;
+        private AverageTrueRange _m5Atr;
 
-
-        // =====================================================
-        // START
-        // =====================================================
+        private DateTime _lastProcessedCandle = DateTime.MinValue;
 
         protected override void OnStart()
         {
-            string symbol =
-                SymbolName
+            string cleanSymbol = SymbolName
                 .ToUpperInvariant()
                 .Replace("/", "")
                 .Replace("-", "");
 
-            if (!symbol.Contains("XAU") || !symbol.Contains("USD"))
+            if (!cleanSymbol.Contains("XAU") || !cleanSymbol.Contains("USD"))
             {
-                Print("ERROR: This bot is for XAUUSD / GOLD only.");
+                Print("ERROR: Attach this bot to an XAUUSD/Gold chart.");
                 Stop();
                 return;
             }
 
-            _m5 = MarketData.GetBars(
-                TimeFrame.Minute5,
-                SymbolName
-            );
+            _m5 = MarketData.GetBars(TimeFrame.Minute5, SymbolName);
+            _m15 = MarketData.GetBars(TimeFrame.Minute15, SymbolName);
+            _h1 = MarketData.GetBars(TimeFrame.Hour, SymbolName);
 
-            _m15 = MarketData.GetBars(
-                TimeFrame.Minute15,
-                SymbolName
-            );
+            _m5Ema20 = Indicators.ExponentialMovingAverage(_m5.ClosePrices, 20);
+            _m5Ema50 = Indicators.ExponentialMovingAverage(_m5.ClosePrices, 50);
 
-            _h1 = MarketData.GetBars(
-                TimeFrame.Hour,
-                SymbolName
-            );
+            _m15Ema20 = Indicators.ExponentialMovingAverage(_m15.ClosePrices, 20);
+            _m15Ema50 = Indicators.ExponentialMovingAverage(_m15.ClosePrices, 50);
 
-            Positions.Closed += OnPositionClosed;
+            _h1Ema50 = Indicators.ExponentialMovingAverage(_h1.ClosePrices, 50);
+            _h1Ema200 = Indicators.ExponentialMovingAverage(_h1.ClosePrices, 200);
 
-            RestoreInitialRisk();
+            _m5Rsi = Indicators.RelativeStrengthIndex(_m5.ClosePrices, 14);
+            _m5Macd = Indicators.MacdHistogram(_m5.ClosePrices, 26, 12, 9);
+            _m5Atr = Indicators.AverageTrueRange(_m5, 14, MovingAverageType.Exponential);
 
-            // Analyse every second
             Timer.Start(1);
 
             Chart.DrawStaticText(
                 "BOT_STATUS",
-                "🤖 XAUUSD ROBOT RUNNING\nANALYSING EVERY SECOND",
+                EnableRealTrading
+                    ? "GOLD AI BOT\nREAL TRADING ENABLED"
+                    : "GOLD AI BOT\nSIGNAL/DEMO MODE",
                 VerticalAlignment.Bottom,
                 HorizontalAlignment.Left,
-                Color.White
+                EnableRealTrading ? Color.Lime : Color.Yellow
             );
 
-            Print("==================================================");
-            Print("XAUUSD MULTI TIMEFRAME ROBOT");
-            Print("M5 ENTRY");
-            Print("M15 CONFIRMATION");
-            Print("H1 TREND");
-            Print("ANALYSIS EVERY 1 SECOND");
-            Print("TRAILING STOP EVERY PRICE TICK");
-            Print("RISK / REWARD = 1:{0}", RiskReward);
-            Print("==================================================");
-
-            if (AnalyseImmediately)
-                AnalyseMarket();
+            Print("Gold AI Trading Bot started.");
+            Print("Real trading: {0}", EnableRealTrading);
+            Print("Minimum score: {0}", MinimumSignalScore);
         }
-
-
-        // =====================================================
-        // ANALYSE EVERY SECOND
-        // =====================================================
 
         protected override void OnTimer()
         {
-            AnalyseMarket();
-        }
+            if (!HasEnoughData())
+                return;
 
+            int m5Index = _m5.Count - 2;
+            DateTime candleTime = _m5.OpenTimes[m5Index];
 
-        // =====================================================
-        // TRAILING STOP EVERY PRICE TICK
-        // =====================================================
-
-        protected override void OnTick()
-        {
-            ManageTrailingStops();
-        }
-
-
-        // =====================================================
-        // RESTORE INITIAL RISK
-        // =====================================================
-
-        private void RestoreInitialRisk()
-        {
-            Position[] positions =
-                Positions.FindAll(
-                    Label,
-                    SymbolName
-                );
-
-            foreach (Position position in positions)
+            if (candleTime != _lastProcessedCandle)
             {
-                if (_initialRisk.ContainsKey(position.Id))
-                    continue;
+                _lastProcessedCandle = candleTime;
+                AnalyseAndTrade(m5Index);
+            }
 
-                if (!position.StopLoss.HasValue)
-                    continue;
+            ManageTrailingStop();
+        }
 
-                double risk =
-                    Math.Abs(
-                        position.EntryPrice -
-                        position.StopLoss.Value
-                    );
+        private bool HasEnoughData()
+        {
+            return _m5 != null &&
+                   _m15 != null &&
+                   _h1 != null &&
+                   _m5.Count >= 210 &&
+                   _m15.Count >= 60 &&
+                   _h1.Count >= 210;
+        }
 
-                if (risk > 0)
-                    _initialRisk[position.Id] = risk;
+        private void AnalyseAndTrade(int m5Index)
+        {
+            int m15Index = _m15.Count - 2;
+            int h1Index = _h1.Count - 2;
+
+            int buyScore = 0;
+            int sellScore = 0;
+
+            double price = _m5.ClosePrices[m5Index];
+            double atr = _m5Atr.Result[m5Index];
+            double rsi = _m5Rsi.Result[m5Index];
+            double macd = _m5Macd.Histogram[m5Index];
+
+            // H1 main trend
+            if (_h1Ema50.Result[h1Index] > _h1Ema200.Result[h1Index] &&
+                _h1.ClosePrices[h1Index] > _h1Ema200.Result[h1Index])
+            {
+                buyScore += 25;
+            }
+            else if (_h1Ema50.Result[h1Index] < _h1Ema200.Result[h1Index] &&
+                     _h1.ClosePrices[h1Index] < _h1Ema200.Result[h1Index])
+            {
+                sellScore += 25;
+            }
+
+            // M15 confirmation
+            if (_m15Ema20.Result[m15Index] > _m15Ema50.Result[m15Index] &&
+                _m15.ClosePrices[m15Index] > _m15Ema20.Result[m15Index])
+            {
+                buyScore += 20;
+            }
+            else if (_m15Ema20.Result[m15Index] < _m15Ema50.Result[m15Index] &&
+                     _m15.ClosePrices[m15Index] < _m15Ema20.Result[m15Index])
+            {
+                sellScore += 20;
+            }
+
+            // M5 trend
+            if (_m5Ema20.Result[m5Index] > _m5Ema50.Result[m5Index] &&
+                price > _m5Ema20.Result[m5Index])
+            {
+                buyScore += 15;
+            }
+            else if (_m5Ema20.Result[m5Index] < _m5Ema50.Result[m5Index] &&
+                     price < _m5Ema20.Result[m5Index])
+            {
+                sellScore += 15;
+            }
+
+            // RSI momentum
+            if (rsi >= 52 && rsi <= 70)
+                buyScore += 10;
+            else if (rsi >= 30 && rsi <= 48)
+                sellScore += 10;
+
+            // MACD
+            if (macd > 0)
+                buyScore += 10;
+            else if (macd < 0)
+                sellScore += 10;
+
+            // Three-candle confirmation
+            if (ThreeBullishCandles(m5Index))
+                buyScore += 15;
+
+            if (ThreeBearishCandles(m5Index))
+                sellScore += 15;
+
+            // Breakout
+            double previousHigh = HighestHigh(m5Index - 1, 20);
+            double previousLow = LowestLow(m5Index - 1, 20);
+
+            if (price > previousHigh)
+                buyScore += 10;
+
+            if (price < previousLow)
+                sellScore += 10;
+
+            string signal = "WAIT";
+            int confidence = Math.Max(buyScore, sellScore);
+
+            if (buyScore >= MinimumSignalScore && buyScore >= sellScore + 10)
+                signal = "BUY";
+            else if (sellScore >= MinimumSignalScore && sellScore >= buyScore + 10)
+                signal = "SELL";
+
+            DrawSignal(signal, buyScore, sellScore, confidence, price);
+
+            Print(
+                "{0} | Signal: {1} | Buy: {2} | Sell: {3} | RSI: {4:F1} | ATR: {5:F2}",
+                _m5.OpenTimes[m5Index],
+                signal,
+                buyScore,
+                sellScore,
+                rsi,
+                atr
+            );
+
+            if (signal == "WAIT" || atr <= 0)
+                return;
+
+            if (!EnableRealTrading)
+            {
+                Print("Signal detected, but real trading is disabled.");
+                return;
+            }
+
+            if (OneTradeAtATime &&
+                Positions.FindAll(BotLabel, SymbolName).Length > 0)
+            {
+                Print("Trade blocked: an existing bot position is open.");
+                return;
+            }
+
+            double spreadPips = (Symbol.Ask - Symbol.Bid) / Symbol.PipSize;
+
+            if (spreadPips > MaximumSpreadPips)
+            {
+                Print("Trade blocked: spread is {0:F1} pips.", spreadPips);
+                return;
+            }
+
+            ExecuteTrade(signal, atr);
+        }
+
+        private void ExecuteTrade(string signal, double atr)
+        {
+            TradeType tradeType =
+                signal == "BUY" ? TradeType.Buy : TradeType.Sell;
+
+            double stopLossPips = Math.Max(
+                (atr * StopAtrMultiplier) / Symbol.PipSize,
+                1
+            );
+
+            double takeProfitPips = Math.Max(
+                stopLossPips * RiskReward,
+                1
+            );
+
+            double volume = Symbol.NormalizeVolumeInUnits(
+                VolumeInUnits,
+                RoundingMode.Down
+            );
+
+            volume = Math.Max(volume, Symbol.VolumeInUnitsMin);
+            volume = Math.Min(volume, Symbol.VolumeInUnitsMax);
+
+            TradeResult result = ExecuteMarketOrder(
+                tradeType,
+                SymbolName,
+                volume,
+                BotLabel,
+                stopLossPips,
+                takeProfitPips
+            );
+
+            if (result.IsSuccessful)
+            {
+                Print(
+                    "TRADE EXECUTED | {0} | Entry: {1} | SL: {2:F1} pips | TP: {3:F1} pips",
+                    signal,
+                    result.Position.EntryPrice,
+                    stopLossPips,
+                    takeProfitPips
+                );
+            }
+            else
+            {
+                Print("ORDER FAILED: {0}", result.Error);
             }
         }
 
-
-        // =====================================================
-        // POSITION CLOSED
-        // =====================================================
-
-        private void OnPositionClosed(
-            PositionClosedEventArgs args
-        )
+        private void ManageTrailingStop()
         {
-            Position position = args.Position;
-
-            if (
-                position.Label != Label ||
-                position.SymbolName != SymbolName
-            )
+            if (!EnableTrailingStop || _m5Atr == null || _m5.Count < 20)
                 return;
 
-            if (_initialRisk.ContainsKey(position.Id))
-                _initialRisk.Remove(position.Id);
-        }
-
-
-        // =====================================================
-        // LIVE TRAILING STOP
-        // =====================================================
-
-        private void ManageTrailingStops()
-        {
-            if (!EnableTrailingStop)
-                return;
-
-            if (_m5 == null || _m5.Count < 30)
-                return;
-
-            int index =
-                _m5.Count - 2;
-
-            double atr =
-                ATR(
-                    _m5,
-                    index,
-                    14
-                );
+            int index = _m5.Count - 2;
+            double atr = _m5Atr.Result[index];
 
             if (atr <= 0)
                 return;
 
-            Position[] positions =
-                Positions.FindAll(
-                    Label,
-                    SymbolName
-                );
+            Position[] positions = Positions.FindAll(BotLabel, SymbolName);
 
             foreach (Position position in positions)
             {
-                if (!_initialRisk.ContainsKey(position.Id))
-                {
-                    if (position.StopLoss.HasValue)
-                    {
-                        double risk =
-                            Math.Abs(
-                                position.EntryPrice -
-                                position.StopLoss.Value
-                            );
-
-                        if (risk > 0)
-                            _initialRisk[position.Id] = risk;
-                    }
-                }
-
-                if (!_initialRisk.ContainsKey(position.Id))
+                if (!position.StopLoss.HasValue)
                     continue;
 
-                double initialRisk =
-                    _initialRisk[position.Id];
+                double initialRisk = Math.Abs(
+                    position.EntryPrice - position.StopLoss.Value
+                );
 
                 if (initialRisk <= 0)
                     continue;
 
-
-                // =================================================
-                // BUY TRAILING
-                // =================================================
-
                 if (position.TradeType == TradeType.Buy)
                 {
-                    double currentPrice =
-                        Symbol.Bid;
+                    double profitDistance = Symbol.Bid - position.EntryPrice;
 
-                    double profitDistance =
-                        currentPrice -
-                        position.EntryPrice;
-
-                    double triggerDistance =
-                        initialRisk *
-                        BreakevenTriggerR;
-
-                    if (profitDistance < triggerDistance)
+                    if (profitDistance < initialRisk * BreakevenTriggerR)
                         continue;
 
+                    double breakeven = position.EntryPrice + Symbol.PipSize;
+                    double trailing = Symbol.Bid - atr * TrailingAtrMultiplier;
+                    double newStop = Math.Max(breakeven, trailing);
 
-                    double breakeven =
-                        position.EntryPrice +
-                        (
-                            BreakevenExtraPips *
-                            Symbol.PipSize
-                        );
-
-
-                    double trailingStop =
-                        currentPrice -
-                        (
-                            atr *
-                            TrailingAtrMultiplier
-                        );
-
-
-                    double newStop =
-                        Math.Max(
-                            breakeven,
-                            trailingStop
-                        );
-
-
-                    if (newStop >= currentPrice)
+                    if (newStop >= Symbol.Bid)
                         continue;
 
-
-                    bool shouldMove =
-                        !position.StopLoss.HasValue ||
-                        newStop >
-                        position.StopLoss.Value;
-
-
-                    if (!shouldMove)
-                        continue;
-
-
-                    TradeResult result =
-                        ModifyPosition(
-                            position,
-                            newStop,
-                            position.TakeProfit
-                        );
-
-
-                    if (result.IsSuccessful)
-                    {
-                        Print(
-                            "🔒 BUY TRAIL | PRICE {0:F2} | SL {1:F2}",
-                            currentPrice,
-                            newStop
-                        );
-                    }
+                    if (newStop > position.StopLoss.Value)
+                        ModifyPosition(position, newStop, position.TakeProfit);
                 }
-
-
-                // =================================================
-                // SELL TRAILING
-                // =================================================
-
-                else if (position.TradeType == TradeType.Sell)
+                else
                 {
-                    double currentPrice =
-                        Symbol.Ask;
+                    double profitDistance = position.EntryPrice - Symbol.Ask;
 
-                    double profitDistance =
-                        position.EntryPrice -
-                        currentPrice;
-
-                    double triggerDistance =
-                        initialRisk *
-                        BreakevenTriggerR;
-
-                    if (profitDistance < triggerDistance)
+                    if (profitDistance < initialRisk * BreakevenTriggerR)
                         continue;
 
+                    double breakeven = position.EntryPrice - Symbol.PipSize;
+                    double trailing = Symbol.Ask + atr * TrailingAtrMultiplier;
+                    double newStop = Math.Min(breakeven, trailing);
 
-                    double breakeven =
-                        position.EntryPrice -
-                        (
-                            BreakevenExtraPips *
-                            Symbol.PipSize
-                        );
-
-
-                    // As price goes DOWN,
-                    // trailing stop follows DOWN.
-
-                    double trailingStop =
-                        currentPrice +
-                        (
-                            atr *
-                            TrailingAtrMultiplier
-                        );
-
-
-                    double newStop =
-                        Math.Min(
-                            breakeven,
-                            trailingStop
-                        );
-
-
-                    if (newStop <= currentPrice)
+                    if (newStop <= Symbol.Ask)
                         continue;
 
-
-                    // ONLY MOVE SELL SL DOWN
-                    bool shouldMove =
-                        !position.StopLoss.HasValue ||
-                        newStop <
-                        position.StopLoss.Value;
-
-
-                    if (!shouldMove)
-                        continue;
-
-
-                    TradeResult result =
-                        ModifyPosition(
-                            position,
-                            newStop,
-                            position.TakeProfit
-                        );
-
-
-                    if (result.IsSuccessful)
-                    {
-                        Print(
-                            "🔒 SELL TRAIL | PRICE {0:F2} | SL {1:F2}",
-                            currentPrice,
-                            newStop
-                        );
-                    }
+                    if (newStop < position.StopLoss.Value)
+                        ModifyPosition(position, newStop, position.TakeProfit);
                 }
             }
         }
 
-
-        // =====================================================
-        // ANALYSE MARKET
-        // =====================================================
-
-        private void AnalyseMarket()
+        private bool ThreeBullishCandles(int index)
         {
-            if (
-                _m5 == null ||
-                _m15 == null ||
-                _h1 == null
-            )
-                return;
+            if (index < 2)
+                return false;
 
-
-            int m5Index =
-                _m5.Count - 2;
-
-            int m15Index =
-                _m15.Count - 2;
-
-            int h1Index =
-                _h1.Count - 2;
-
-
-            if (
-                m5Index < 210 ||
-                m15Index < 210 ||
-                h1Index < 210
-            )
-            {
-                Print(
-                    "Waiting for enough historical data..."
-                );
-
-                return;
-            }
-
-
-            DateTime candleTime =
-                _m5.OpenTimes[m5Index];
-
-
-            TfAnalysis entry =
-                AnalyseTimeframe(
-                    _m5,
-                    m5Index
-                );
-
-
-            TfAnalysis confirmation =
-                AnalyseTimeframe(
-                    _m15,
-                    m15Index
-                );
-
-
-            TfAnalysis trend =
-                AnalyseTimeframe(
-                    _h1,
-                    h1Index
-                );
-
-
-            SignalData signal =
-                CreateSignal(
-                    entry,
-                    confirmation,
-                    trend
-                );
-
-
-            TradeLevels levels =
-                CalculateTradeLevels(
-                    signal,
-                    entry
-                );
-
-
-            // Draw bull / bear on chart
-            DrawSignalOnChart(
-                signal,
-                entry
-            );
-
-
-            PrintReport(
-                entry,
-                confirmation,
-                trend,
-                signal,
-                levels
-            );
-
-
-            if (signal.Signal == "WAIT")
-                return;
-
-
-            if (!EnableRealTrading)
-            {
-                Print(
-                    "SIGNAL MODE: Real order not sent."
-                );
-
-                return;
-            }
-
-
-            if (_lastTradeCandle == candleTime)
-                return;
-
-
-            if (
-                OnePositionAtATime &&
-                Positions.FindAll(
-                    Label,
-                    SymbolName
-                ).Length > 0
-            )
-            {
-                Print(
-                    "Existing position already open."
-                );
-
-                return;
-            }
-
-
-            double spread =
-                (
-                    Symbol.Ask -
-                    Symbol.Bid
-                )
-                /
-                Symbol.PipSize;
-
-
-            if (spread > MaximumSpreadPips)
-            {
-                Print(
-                    "Spread too high: {0:F1} pips",
-                    spread
-                );
-
-                return;
-            }
-
-
-            ExecuteSignal(
-                signal,
-                levels,
-                candleTime
-            );
+            return IsBullish(index) &&
+                   IsBullish(index - 1) &&
+                   IsBullish(index - 2);
         }
 
+        private bool ThreeBearishCandles(int index)
+        {
+            if (index < 2)
+                return false;
 
-        // =====================================================
-        // 🐂 BULL / 🐻 BEAR CHART DISPLAY
-        // =====================================================
+            return IsBearish(index) &&
+                   IsBearish(index - 1) &&
+                   IsBearish(index - 2);
+        }
 
-        private void DrawSignalOnChart(
-            SignalData signal,
-            TfAnalysis entry
+        private bool IsBullish(int index)
+        {
+            return _m5.ClosePrices[index] > _m5.OpenPrices[index];
+        }
+
+        private bool IsBearish(int index)
+        {
+            return _m5.ClosePrices[index] < _m5.OpenPrices[index];
+        }
+
+        private double HighestHigh(int endIndex, int lookback)
+        {
+            double highest = double.MinValue;
+            int start = Math.Max(0, endIndex - lookback + 1);
+
+            for (int i = start; i <= endIndex; i++)
+                highest = Math.Max(highest, _m5.HighPrices[i]);
+
+            return highest;
+        }
+
+        private double LowestLow(int endIndex, int lookback)
+        {
+            double lowest = double.MaxValue;
+            int start = Math.Max(0, endIndex - lookback + 1);
+
+            for (int i = start; i <= endIndex; i++)
+                lowest = Math.Min(lowest, _m5.LowPrices[i]);
+
+            return lowest;
+        }
+
+        private void DrawSignal(
+            string signal,
+            int buyScore,
+            int sellScore,
+            int confidence,
+            double price
         )
         {
-            // Remove previous live arrow/text
-            Chart.RemoveObject("LIVE_SIGNAL_ARROW");
-            Chart.RemoveObject("LIVE_SIGNAL_PRICE");
+            Color color = Color.Yellow;
+            string heading = "WAIT";
 
-
-            // =================================================
-            // BUY = BULL
-            // =================================================
-
-            if (signal.Signal == "BUY")
+            if (signal == "BUY")
             {
-                Chart.DrawStaticText(
-                    "LIVE_SIGNAL",
-                    "🐂\n🐂 BULL BUY SIGNAL 🐂\n" +
-                    "BUY SCORE: " + signal.BuyScore +
-                    "\nCONFIDENCE: " + signal.Confidence + "%" +
-                    "\nPRICE: " + Symbol.Ask.ToString("F2"),
-                    VerticalAlignment.Top,
-                    HorizontalAlignment.Right,
-                    Color.Lime
-                );
-
-
-                Chart.DrawIcon(
-                    "LIVE_SIGNAL_ARROW",
-                    ChartIconType.UpArrow,
-                    Server.Time,
-                    Symbol.Bid,
-                    Color.Lime
-                );
-
-
-                Chart.DrawText(
-                    "LIVE_SIGNAL_PRICE",
-                    "🐂 BUY",
-                    Server.Time,
-                    Symbol.Bid -
-                    entry.Atr * 0.25,
-                    Color.Lime
-                );
+                color = Color.Lime;
+                heading = "BULL BUY SIGNAL";
+            }
+            else if (signal == "SELL")
+            {
+                color = Color.Red;
+                heading = "BEAR SELL SIGNAL";
             }
 
-
-            // =================================================
-            // SELL = BEAR
-            // =================================================
-
-            else if (signal.Signal == "SELL")
-            {
-                Chart.DrawStaticText(
-                    "LIVE_SIGNAL",
-                    "🐻\n🐻 BEAR SELL SIGNAL 🐻\n" +
-                    "SELL SCORE: " + signal.SellScore +
-                    "\nCONFIDENCE: " + signal.Confidence + "%" +
-                    "\nPRICE: " + Symbol.Bid.ToString("F2"),
-                    VerticalAlignment.Top,
-                    HorizontalAlignment.Right,
-                    Color.Red
-                );
-
-
-                Chart.DrawIcon(
-                    "LIVE_SIGNAL_ARROW",
-                    ChartIconType.DownArrow,
-                    Server.Time,
-                    Symbol.Ask,
-                    Color.Red
-                );
-
-
-                Chart.DrawText(
-                    "LIVE_SIGNAL_PRICE",
-                    "🐻 SELL",
-                    Server.Time,
-                    Symbol.Ask +
-                    entry.Atr * 0.25,
-                    Color.Red
-                );
-            }
-
-
-            // =================================================
-            // WAIT
-            // =================================================
-
-            else
-            {
-                Chart.DrawStaticText(
-                    "LIVE_SIGNAL",
-                    "⏳ WAIT\n" +
-                    "BUY: " + signal.BuyScore +
-                    "\nSELL: " + signal.SellScore +
-                    "\nREQUIRED: " + signal.RequiredScore,
-                    VerticalAlignment.Top,
-                    HorizontalAlignment.Right,
-                    Color.Yellow
-                );
-            }
-        }
-
-
-        // =====================================================
-        // TIMEFRAME ANALYSIS
-        // =====================================================
-
-        private TfAnalysis AnalyseTimeframe(
-            Bars bars,
-            int index
-        )
-        {
-            double[] closes =
-                GetCloses(
-                    bars,
-                    index,
-                    260
-                );
-
-
-            double current =
-                closes[
-                    closes.Length - 1
-                ];
-
-
-            double ema9 =
-                EMA(
-                    closes,
-                    9
-                );
-
-
-            double ema20 =
-                EMA(
-                    closes,
-                    20
-                );
-
-
-            double ema50 =
-                EMA(
-                    closes,
-                    50
-                );
-
-
-            double ema200 =
-                EMA(
-                    closes,
-                    200
-                );
-
-
-            double rsi =
-                RSI(
-                    closes,
-                    14
-                );
-
-
-            double macdHistogram =
-                MACDHistogram(
-                    closes
-                );
-
-
-            double atr =
-                ATR(
-                    bars,
-                    index,
-                    14
-                );
-
-
-            double momentum =
-                Momentum(
-                    closes,
-                    10
-                );
-
-
-            double volatility =
-                Volatility(
-                    closes,
-                    20
-                );
-
-
-            double vwap =
-                VWAP(
-                    bars,
-                    index,
-                    120
-                );
-
-
-            double relativeVolume =
-                RelativeVolume(
-                    bars,
-                    index,
-                    20
-                );
-
-
-            StructureResult structure =
-                AnalyseStructure(
-                    bars,
-                    index
-                );
-
-
-            string breakout =
-                AnalyseBreakout(
-                    bars,
-                    index,
-                    20
-                );
-
-
-            string falseBreakout =
-                FalseBreakout(
-                    bars,
-                    index,
-                    20
-                );
-
-
-            string candlePattern =
-                CandlePattern(
-                    bars,
-                    index
-                );
-
-
-            int bull = 0;
-            int bear = 0;
-
-
-            if (ema9 > ema20)
-                bull += 1;
-            else
-                bear += 1;
-
-
-            if (ema20 > ema50)
-                bull += 2;
-            else
-                bear += 2;
-
-
-            if (ema50 > ema200)
-                bull += 3;
-            else
-                bear += 3;
-
-
-            if (current > ema200)
-                bull += 2;
-            else
-                bear += 2;
-
-
-            if (structure.Trend == "BULLISH")
-                bull += 2;
-
-            else if (structure.Trend == "BEARISH")
-                bear += 2;
-
-
-            if (macdHistogram > 0)
-                bull += 2;
-
-            else if (macdHistogram < 0)
-                bear += 2;
-
-
-            if (momentum > 0)
-                bull += 1;
-
-            else if (momentum < 0)
-                bear += 1;
-
-
-            if (vwap > 0)
-            {
-                if (current > vwap)
-                    bull += 1;
-                else
-                    bear += 1;
-            }
-
-
-            string direction;
-
-
-            if (bull >= bear + 3)
-                direction = "BULLISH";
-
-            else if (bear >= bull + 3)
-                direction = "BEARISH";
-
-            else
-                direction = "NEUTRAL";
-
-
-            string regime;
-
-
-            if (volatility < 0.03)
-                regime = "RANGING";
-
-            else if (volatility > 0.30)
-                regime = "HIGH VOLATILITY";
-
-            else if (breakout != "NONE")
-                regime = "BREAKOUT";
-
-            else
-                regime =
-                    direction +
-                    " TREND";
-
-
-            return new TfAnalysis
-            {
-                Price = current,
-
-                Ema9 = ema9,
-                Ema20 = ema20,
-                Ema50 = ema50,
-                Ema200 = ema200,
-
-                Rsi = rsi,
-
-                MacdHistogram =
-                    macdHistogram,
-
-                Atr = atr,
-
-                Momentum =
-                    momentum,
-
-                Volatility =
-                    volatility,
-
-                Vwap = vwap,
-
-                RelativeVolume =
-                    relativeVolume,
-
-                Structure =
-                    structure,
-
-                Breakout =
-                    breakout,
-
-                FalseBreakout =
-                    falseBreakout,
-
-                CandlePattern =
-                    candlePattern,
-
-                Trend =
-                    direction,
-
-                Regime =
-                    regime,
-
-                BullPoints =
-                    bull,
-
-                BearPoints =
-                    bear
-            };
-        }
-
-
-        // =====================================================
-        // SIGNAL ENGINE
-        // =====================================================
-
-        private SignalData CreateSignal(
-            TfAnalysis entry,
-            TfAnalysis confirm,
-            TfAnalysis trend
-        )
-        {
-            int buy = 0;
-            int sell = 0;
-
-
-            // H1 TREND
-
-            if (trend.Trend == "BULLISH")
-                buy += 20;
-
-            else if (trend.Trend == "BEARISH")
-                sell += 20;
-
-
-            // M15
-
-            if (confirm.Trend == "BULLISH")
-                buy += 15;
-
-            else if (confirm.Trend == "BEARISH")
-                sell += 15;
-
-
-            // M5
-
-            if (entry.Trend == "BULLISH")
-                buy += 15;
-
-            else if (entry.Trend == "BEARISH")
-                sell += 15;
-
-
-            // FULL ALIGNMENT
-
-            if (
-                trend.Trend == "BULLISH" &&
-                confirm.Trend == "BULLISH" &&
-                entry.Trend == "BULLISH"
-            )
-                buy += 10;
-
-
-            if (
-                trend.Trend == "BEARISH" &&
-                confirm.Trend == "BEARISH" &&
-                entry.Trend == "BEARISH"
-            )
-                sell += 10;
-
-
-            // STRUCTURE
-
-            if (
-                entry.Structure.Trend ==
-                "BULLISH"
-            )
-                buy += 10;
-
-            else if (
-                entry.Structure.Trend ==
-                "BEARISH"
-            )
-                sell += 10;
-
-
-            // BOS
-
-            if (
-                entry.Structure.Bos ==
-                "BULLISH BOS"
-            )
-                buy += 8;
-
-            else if (
-                entry.Structure.Bos ==
-                "BEARISH BOS"
-            )
-                sell += 8;
-
-
-            // BREAKOUT
-
-            if (
-                entry.Breakout ==
-                "BULLISH BREAKOUT"
-            )
-                buy += 12;
-
-            else if (
-                entry.Breakout ==
-                "BEARISH BREAKOUT"
-            )
-                sell += 12;
-
-
-            // FALSE BREAKOUT
-
-            if (
-                entry.FalseBreakout ==
-                "BULLISH TRAP"
-            )
-                buy -= 15;
-
-            else if (
-                entry.FalseBreakout ==
-                "BEARISH TRAP"
-            )
-                sell -= 15;
-
-
-            // RSI
-
-            if (
-                entry.Rsi >= 52 &&
-                entry.Rsi <= 70
-            )
-                buy += 8;
-
-            else if (
-                entry.Rsi >= 30 &&
-                entry.Rsi <= 48
-            )
-                sell += 8;
-
-            else if (entry.Rsi > 75)
-                sell += 4;
-
-            else if (entry.Rsi < 25)
-                buy += 4;
-
-
-            // MACD
-
-            if (
-                entry.MacdHistogram > 0
-            )
-                buy += 8;
-
-            else if (
-                entry.MacdHistogram < 0
-            )
-                sell += 8;
-
-
-            // VWAP
-
-            if (entry.Vwap > 0)
-            {
-                if (
-                    entry.Price >
-                    entry.Vwap
-                )
-                    buy += 5;
-
-                else
-                    sell += 5;
-            }
-
-
-            // MOMENTUM
-
-            if (
-                entry.Momentum > 0
-            )
-                buy += 5;
-
-            else if (
-                entry.Momentum < 0
-            )
-                sell += 5;
-
-
-            // CANDLE
-
-            if (
-                entry.CandlePattern ==
-                    "BULLISH ENGULFING" ||
-                entry.CandlePattern ==
-                    "BULLISH REJECTION"
-            )
-                buy += 5;
-
-
-            else if (
-                entry.CandlePattern ==
-                    "BEARISH ENGULFING" ||
-                entry.CandlePattern ==
-                    "BEARISH REJECTION"
-            )
-                sell += 5;
-
-
-            // VOLUME
-
-            if (
-                entry.RelativeVolume >=
-                1.20
-            )
-            {
-                int completed =
-                    _m5.Count - 2;
-
-
-                if (
-                    _m5.ClosePrices[completed] >
-                    _m5.OpenPrices[completed]
-                )
-                    buy += 7;
-
-
-                else if (
-                    _m5.ClosePrices[completed] <
-                    _m5.OpenPrices[completed]
-                )
-                    sell += 7;
-            }
-
-
-            int required =
-                MinimumSignalScore;
-
-
-            if (
-                entry.Regime ==
-                "RANGING"
-            )
-                required =
-                    RangingMinScore;
-
-
-            string signal =
-                "WAIT";
-
-
-            if (
-                buy >= required &&
-                buy >
-                sell + 10
-            )
-                signal =
-                    "BUY";
-
-
-            else if (
-                sell >= required &&
-                sell >
-                buy + 10
-            )
-                signal =
-                    "SELL";
-
-
-            if (entry.Atr <= 0)
-                signal = "WAIT";
-
-
-            if (
-                entry.FalseBreakout !=
-                "NONE"
-            )
-                signal =
-                    "WAIT";
-
-
-            return new SignalData
-            {
-                Signal =
-                    signal,
-
-                BuyScore =
-                    buy,
-
-                SellScore =
-                    sell,
-
-                RequiredScore =
-                    required,
-
-                Confidence =
-                    Math.Min(
-                        99,
-                        Math.Max(
-                            buy,
-                            sell
-                        )
-                    )
-            };
-        }
-
-
-        // =====================================================
-        // CALCULATE TRADE LEVELS
-        // =====================================================
-
-        private TradeLevels CalculateTradeLevels(
-            SignalData signal,
-            TfAnalysis entry
-        )
-        {
-            if (signal.Signal == "WAIT")
-                return new TradeLevels();
-
-
-            double risk =
-                entry.Atr *
-                SlAtrMultiplier;
-
-
-            if (risk <= 0)
-                return new TradeLevels();
-
-
-            double entryPrice =
-                entry.Price;
-
-
-            double stopLoss;
-            double takeProfit;
-
-
-            // BUY
-
-            if (signal.Signal == "BUY")
-            {
-                stopLoss =
-                    entryPrice -
-                    risk;
-
-
-                if (
-                    entry.Structure.LastLow.HasValue &&
-                    entry.Structure.LastLow.Value <
-                    entryPrice
-                )
-                {
-                    double structureStop =
-                        entry.Structure.LastLow.Value
-                        -
-                        entry.Atr *
-                        0.15;
-
-
-                    stopLoss =
-                        Math.Min(
-                            stopLoss,
-                            structureStop
-                        );
-                }
-
-
-                risk =
-                    entryPrice -
-                    stopLoss;
-
-
-                takeProfit =
-                    entryPrice +
-                    risk *
-                    RiskReward;
-            }
-
-
-            // SELL
-
-            else
-            {
-                stopLoss =
-                    entryPrice +
-                    risk;
-
-
-                if (
-                    entry.Structure.LastHigh.HasValue &&
-                    entry.Structure.LastHigh.Value >
-                    entryPrice
-                )
-                {
-                    double structureStop =
-                        entry.Structure.LastHigh.Value
-                        +
-                        entry.Atr *
-                        0.15;
-
-
-                    stopLoss =
-                        Math.Max(
-                            stopLoss,
-                            structureStop
-                        );
-                }
-
-
-                risk =
-                    stopLoss -
-                    entryPrice;
-
-
-                takeProfit =
-                    entryPrice -
-                    risk *
-                    RiskReward;
-            }
-
-
-            return new TradeLevels
-            {
-                Entry =
-                    entryPrice,
-
-                StopLoss =
-                    stopLoss,
-
-                TakeProfit =
-                    takeProfit,
-
-                Tp1 =
-                    signal.Signal == "BUY"
-                    ?
-                    entryPrice + risk
-                    :
-                    entryPrice - risk,
-
-                Tp2 =
-                    signal.Signal == "BUY"
-                    ?
-                    entryPrice + risk * 2
-                    :
-                    entryPrice - risk * 2,
-
-                RiskDistance =
-                    risk
-            };
-        }
-
-
-        // =====================================================
-        // EXECUTE TRADE
-        // =====================================================
-
-        private void ExecuteSignal(
-            SignalData signal,
-            TradeLevels levels,
-            DateTime candleTime
-        )
-        {
-            if (
-                !levels.StopLoss.HasValue ||
-                !levels.TakeProfit.HasValue
-            )
-                return;
-
-
-            TradeType type =
-                signal.Signal == "BUY"
-                ?
-                TradeType.Buy
-                :
-                TradeType.Sell;
-
-
-            double liveEntry =
-                type == TradeType.Buy
-                ?
-                Symbol.Ask
-                :
-                Symbol.Bid;
-
-
-            double slDistance =
-                Math.Abs(
-                    liveEntry -
-                    levels.StopLoss.Value
-                );
-
-
-            if (slDistance <= 0)
-                return;
-
-
-            double stopPips =
-                Math.Max(
-                    slDistance /
-                    Symbol.PipSize,
-                    1
-                );
-
-
-            double takePips =
-                Math.Max(
-                    stopPips *
-                    RiskReward,
-                    1
-                );
-
-
-            double volume =
-                Symbol.NormalizeVolumeInUnits(
-                    VolumeInUnits,
-                    RoundingMode.Down
-                );
-
-
-            volume =
-                Math.Max(
-                    volume,
-                    Symbol.VolumeInUnitsMin
-                );
-
-
-            volume =
-                Math.Min(
-                    volume,
-                    Symbol.VolumeInUnitsMax
-                );
-
-
-            TradeResult result =
-                ExecuteMarketOrder(
-                    type,
-                    SymbolName,
-                    volume,
-                    Label,
-                    stopPips,
-                    takePips
-                );
-
-
-            if (result.IsSuccessful)
-            {
-                _lastTradeCandle =
-                    candleTime;
-
-
-                Position position =
-                    result.Position;
-
-
-                _initialRisk[position.Id] =
-                    stopPips *
-                    Symbol.PipSize;
-
-
-                Print("");
-                Print("🔥 TRADE EXECUTED");
-                Print("TYPE: {0}", signal.Signal);
-                Print("ENTRY: {0}", position.EntryPrice);
-                Print("SL: {0:F1} PIPS", stopPips);
-                Print("TP: {0:F1} PIPS", takePips);
-                Print("");
-            }
-
-            else
-            {
-                Print(
-                    "ORDER FAILED: {0}",
-                    result.Error
-                );
-            }
-        }
-
-
-        // =====================================================
-        // REPORT
-        // =====================================================
-
-        private void PrintReport(
-            TfAnalysis entry,
-            TfAnalysis confirm,
-            TfAnalysis trend,
-            SignalData signal,
-            TradeLevels levels
-        )
-        {
-            Print("");
-
-            Print(
-                "=================================================="
-            );
-
-            Print(
-                "🤖 XAUUSD LIVE ANALYSIS"
-            );
-
-            Print(
-                "TIME: {0:HH:mm:ss}",
-                Server.Time
-            );
-
-            Print(
-                "=================================================="
-            );
-
-
-            Print(
-                "LIVE BID: {0}",
-                Symbol.Bid
-            );
-
-            Print(
-                "LIVE ASK: {0}",
-                Symbol.Ask
-            );
-
-
-            Print("");
-
-            Print(
-                "5M TREND: {0}",
-                entry.Trend
-            );
-
-            Print(
-                "15M TREND: {0}",
-                confirm.Trend
-            );
-
-            Print(
-                "1H TREND: {0}",
-                trend.Trend
-            );
-
-
-            Print("");
-
-            Print(
-                "RSI: {0:F2}",
-                entry.Rsi
-            );
-
-            Print(
-                "MACD: {0:F4}",
-                entry.MacdHistogram
-            );
-
-            Print(
-                "ATR: {0:F2}",
-                entry.Atr
-            );
-
-            Print(
-                "MOMENTUM: {0:F3}%",
-                entry.Momentum
-            );
-
-            Print(
-                "VWAP: {0:F2}",
-                entry.Vwap
-            );
-
-            Print(
-                "VOLUME: {0:F2}x",
-                entry.RelativeVolume
-            );
-
-
-            Print("");
-
-            Print(
-                "STRUCTURE: {0}",
-                entry.Structure.Trend
-            );
-
-            Print(
-                "BOS: {0}",
-                entry.Structure.Bos
-            );
-
-            Print(
-                "BREAKOUT: {0}",
-                entry.Breakout
-            );
-
-
-            Print("");
-
-            Print(
-                "BUY SCORE: {0}",
-                signal.BuyScore
-            );
-
-            Print(
-                "SELL SCORE: {0}",
-                signal.SellScore
-            );
-
-            Print(
-                "REQUIRED: {0}",
-                signal.RequiredScore
-            );
-
-            Print(
-                "CONFIDENCE: {0}%",
-                signal.Confidence
-            );
-
-
-            Print("");
-
-            Print(
-                "🎯 SIGNAL: {0}",
-                signal.Signal
-            );
-
-
-            if (levels.Entry.HasValue)
-            {
-                Print(
-                    "ENTRY: {0:F2}",
-                    levels.Entry.Value
-                );
-
-                Print(
-                    "SL: {0:F2}",
-                    levels.StopLoss.Value
-                );
-
-                Print(
-                    "TP1: {0:F2}",
-                    levels.Tp1.Value
-                );
-
-                Print(
-                    "TP2: {0:F2}",
-                    levels.Tp2.Value
-                );
-
-                Print(
-                    "FINAL TP: {0:F2}",
-                    levels.TakeProfit.Value
-                );
-            }
-
-            Print(
-                "=================================================="
+            Chart.DrawStaticText(
+                "LIVE_SIGNAL",
+                heading +
+                "\nBUY SCORE: " + buyScore +
+                "\nSELL SCORE: " + sellScore +
+                "\nCONFIDENCE: " + confidence + "%" +
+                "\nPRICE: " + price.ToString("F2"),
+                VerticalAlignment.Top,
+                HorizontalAlignment.Right,
+                color
             );
         }
-
-
-        // =====================================================
-        // EMA
-        // =====================================================
-
-        private double EMA(
-            double[] values,
-            int period
-        )
-        {
-            if (values.Length < period)
-                return values[
-                    values.Length - 1
-                ];
-
-
-            double value =
-                values
-                .Take(period)
-                .Average();
-
-
-            double multiplier =
-                2.0 /
-                (
-                    period +
-                    1
-                );
-
-
-            for (
-                int i = period;
-                i < values.Length;
-                i++
-            )
-            {
-                value =
-                    (
-                        values[i] -
-                        value
-                    )
-                    *
-                    multiplier
-                    +
-                    value;
-            }
-
-
-            return value;
-        }
-
-
-        // =====================================================
-        // RSI
-        // =====================================================
-
-        private double RSI(
-            double[] closes,
-            int period
-        )
-        {
-            if (
-                closes.Length <
-                period + 1
-            )
-                return 50;
-
-
-            double gain = 0;
-            double loss = 0;
-
-
-            for (
-                int i = 1;
-                i <= period;
-                i++
-            )
-            {
-                double change =
-                    closes[i] -
-                    closes[i - 1];
-
-
-                if (change > 0)
-                    gain += change;
-
-                else
-                    loss += -change;
-            }
-
-
-            gain /= period;
-            loss /= period;
-
-
-            for (
-                int i = period + 1;
-                i < closes.Length;
-                i++
-            )
-            {
-                double change =
-                    closes[i] -
-                    closes[i - 1];
-
-
-                double currentGain =
-                    Math.Max(
-                        change,
-                        0
-                    );
-
-
-                double currentLoss =
-                    Math.Max(
-                        -change,
-                        0
-                    );
-
-
-                gain =
-                    (
-                        gain *
-                        (
-                            period -
-                            1
-                        )
-                        +
-                        currentGain
-                    )
-                    /
-                    period;
-
-
-                loss =
-                    (
-                        loss *
-                        (
-                            period -
-                            1
-                        )
-                        +
-                        currentLoss
-                    )
-                    /
-                    period;
-            }
-
-
-            if (loss == 0)
-                return 100;
-
-
-            double rs =
-                gain /
-                loss;
-
-
-            return
-                100 -
-                (
-                    100 /
-                    (
-                        1 +
-                        rs
-                    )
-                );
-        }
-
-
-        // =====================================================
-        // MACD
-        // =====================================================
-
-        private double MACDHistogram(
-            double[] closes
-        )
-        {
-            if (closes.Length < 40)
-                return 0;
-
-
-            List<double> macd =
-                new List<double>();
-
-
-            for (
-                int i = 26;
-                i < closes.Length;
-                i++
-            )
-            {
-                double[] section =
-                    closes
-                    .Take(
-                        i + 1
-                    )
-                    .ToArray();
-
-
-                macd.Add(
-                    EMA(
-                        section,
-                        12
-                    )
-                    -
-                    EMA(
-                        section,
-                        26
-                    )
-                );
-            }
-
-
-            if (macd.Count < 9)
-                return 0;
-
-
-            double signal =
-                EMA(
-                    macd.ToArray(),
-                    9
-                );
-
-
-            return
-                macd[
-                    macd.Count - 1
-                ]
-                -
-                signal;
-        }
-
-
-        // =====================================================
-        // ATR
-        // =====================================================
-
-        private double ATR(
-            Bars bars,
-            int index,
-            int period
-        )
-        {
-            if (
-                index <
-                period + 1
-            )
-                return 0;
-
-
-            List<double> tr =
-                new List<double>();
-
-
-            int start =
-                Math.Max(
-                    1,
-                    index -
-                    period * 4
-                );
-
-
-            for (
-                int i = start;
-                i <= index;
-                i++
-            )
-            {
-                double highLow =
-                    bars.HighPrices[i] -
-                    bars.LowPrices[i];
-
-
-                double highClose =
-                    Math.Abs(
-                        bars.HighPrices[i] -
-                        bars.ClosePrices[
-                            i - 1
-                        ]
-                    );
-
-
-                double lowClose =
-                    Math.Abs(
-                        bars.LowPrices[i] -
-                        bars.ClosePrices[
-                            i - 1
-                        ]
-                    );
-
-
-                tr.Add(
-                    Math.Max(
-                        highLow,
-                        Math.Max(
-                            highClose,
-                            lowClose
-                        )
-                    )
-                );
-            }
-
-
-            if (tr.Count < period)
-                return 0;
-
-
-            double atr =
-                tr
-                .Take(period)
-                .Average();
-
-
-            for (
-                int i = period;
-                i < tr.Count;
-                i++
-            )
-            {
-                atr =
-                    (
-                        atr *
-                        (
-                            period -
-                            1
-                        )
-                        +
-                        tr[i]
-                    )
-                    /
-                    period;
-            }
-
-
-            return atr;
-        }
-
-
-        // =====================================================
-        // MOMENTUM
-        // =====================================================
-
-        private double Momentum(
-            double[] closes,
-            int period
-        )
-        {
-            if (
-                closes.Length <=
-                period
-            )
-                return 0;
-
-
-            double old =
-                closes[
-                    closes.Length -
-                    period -
-                    1
-                ];
-
-
-            double current =
-                closes[
-                    closes.Length -
-                    1
-                ];
-
-
-            if (old == 0)
-                return 0;
-
-
-            return
-                (
-                    (
-                        current -
-                        old
-                    )
-                    /
-                    old
-                )
-                *
-                100;
-        }
-
-
-        // =====================================================
-        // VOLATILITY
-        // =====================================================
-
-        private double Volatility(
-            double[] closes,
-            int period
-        )
-        {
-            if (
-                closes.Length <
-                period + 1
-            )
-                return 0;
-
-
-            List<double> returns =
-                new List<double>();
-
-
-            for (
-                int i =
-                    closes.Length -
-                    period;
-                i < closes.Length;
-                i++
-            )
-            {
-                double previous =
-                    closes[
-                        i - 1
-                    ];
-
-
-                if (previous == 0)
-                    continue;
-
-
-                returns.Add(
-                    (
-                        (
-                            closes[i] -
-                            previous
-                        )
-                        /
-                        previous
-                    )
-                    *
-                    100
-                );
-            }
-
-
-            if (returns.Count < 2)
-                return 0;
-
-
-            double average =
-                returns.Average();
-
-
-            double variance =
-                returns
-                .Select(
-                    x =>
-                    Math.Pow(
-                        x -
-                        average,
-                        2
-                    )
-                )
-                .Average();
-
-
-            return
-                Math.Sqrt(
-                    variance
-                );
-        }
-
-
-        // =====================================================
-        // VWAP
-        // =====================================================
-
-        private double VWAP(
-            Bars bars,
-            int index,
-            int lookback
-        )
-        {
-            int start =
-                Math.Max(
-                    0,
-                    index -
-                    lookback +
-                    1
-                );
-
-
-            double total = 0;
-            double volumeTotal = 0;
-
-
-            for (
-                int i = start;
-                i <= index;
-                i++
-            )
-            {
-                double volume =
-                    bars.TickVolumes[i];
-
-
-                double typical =
-                    (
-                        bars.HighPrices[i] +
-                        bars.LowPrices[i] +
-                        bars.ClosePrices[i]
-                    )
-                    /
-                    3.0;
-
-
-                total +=
-                    typical *
-                    volume;
-
-
-                volumeTotal +=
-                    volume;
-            }
-
-
-            if (volumeTotal <= 0)
-                return 0;
-
-
-            return
-                total /
-                volumeTotal;
-        }
-
-
-        // =====================================================
-        // RELATIVE VOLUME
-        // =====================================================
-
-        private double RelativeVolume(
-            Bars bars,
-            int index,
-            int period
-        )
-        {
-            if (
-                index <
-                period + 1
-            )
-                return 1;
-
-
-            double average = 0;
-
-
-            for (
-                int i =
-                    index - period;
-                i < index;
-                i++
-            )
-            {
-                average +=
-                    bars.TickVolumes[i];
-            }
-
-
-            average /= period;
-
-
-            if (average <= 0)
-                return 1;
-
-
-            return
-                bars.TickVolumes[index] /
-                average;
-        }
-
-
-        // =====================================================
-        // STRUCTURE
-        // =====================================================
-
-        private StructureResult AnalyseStructure(
-            Bars bars,
-            int index
-        )
-        {
-            List<double> highs =
-                new List<double>();
-
-            List<double> lows =
-                new List<double>();
-
-
-            int start =
-                Math.Max(
-                    3,
-                    index - 100
-                );
-
-
-            for (
-                int i = start;
-                i < index - 2;
-                i++
-            )
-            {
-                bool swingHigh =
-                    bars.HighPrices[i] >
-                    bars.HighPrices[i - 1]
-                    &&
-                    bars.HighPrices[i] >
-                    bars.HighPrices[i - 2]
-                    &&
-                    bars.HighPrices[i] >
-                    bars.HighPrices[i + 1]
-                    &&
-                    bars.HighPrices[i] >
-                    bars.HighPrices[i + 2];
-
-
-                bool swingLow =
-                    bars.LowPrices[i] <
-                    bars.LowPrices[i - 1]
-                    &&
-                    bars.LowPrices[i] <
-                    bars.LowPrices[i - 2]
-                    &&
-                    bars.LowPrices[i] <
-                    bars.LowPrices[i + 1]
-                    &&
-                    bars.LowPrices[i] <
-                    bars.LowPrices[i + 2];
-
-
-                if (swingHigh)
-                    highs.Add(
-                        bars.HighPrices[i]
-                    );
-
-
-                if (swingLow)
-                    lows.Add(
-                        bars.LowPrices[i]
-                    );
-            }
-
-
-            string trend =
-                "NEUTRAL";
-
-            string bos =
-                "NONE";
-
-
-            double? lastHigh =
-                highs.Count > 0
-                ?
-                highs[
-                    highs.Count - 1
-                ]
-                :
-                (double?)null;
-
-
-            double? lastLow =
-                lows.Count > 0
-                ?
-                lows[
-                    lows.Count - 1
-                ]
-                :
-                (double?)null;
-
-
-            if (
-                highs.Count >= 2 &&
-                lows.Count >= 2
-            )
-            {
-                double previousHigh =
-                    highs[
-                        highs.Count - 2
-                    ];
-
-
-                double currentHigh =
-                    highs[
-                        highs.Count - 1
-                    ];
-
-
-                double previousLow =
-                    lows[
-                        lows.Count - 2
-                    ];
-
-
-                double currentLow =
-                    lows[
-                        lows.Count - 1
-                    ];
-
-
-                if (
-                    currentHigh >
-                    previousHigh
-                    &&
-                    currentLow >
-                    previousLow
-                )
-                    trend =
-                        "BULLISH";
-
-
-                else if (
-                    currentHigh <
-                    previousHigh
-                    &&
-                    currentLow <
-                    previousLow
-                )
-                    trend =
-                        "BEARISH";
-
-
-                else
-                    trend =
-                        "RANGING";
-
-
-                double close =
-                    bars.ClosePrices[index];
-
-
-                if (
-                    close >
-                    currentHigh
-                )
-                    bos =
-                        "BULLISH BOS";
-
-
-                else if (
-                    close <
-                    currentLow
-                )
-                    bos =
-                        "BEARISH BOS";
-            }
-
-
-            return new StructureResult
-            {
-                Trend =
-                    trend,
-
-                Bos =
-                    bos,
-
-                LastHigh =
-                    lastHigh,
-
-                LastLow =
-                    lastLow
-            };
-        }
-
-
-        // =====================================================
-        // BREAKOUT
-        // =====================================================
-
-        private string AnalyseBreakout(
-            Bars bars,
-            int index,
-            int lookback
-        )
-        {
-            if (index < lookback)
-                return "NONE";
-
-
-            double highest =
-                double.MinValue;
-
-            double lowest =
-                double.MaxValue;
-
-
-            for (
-                int i =
-                    index - lookback;
-                i < index;
-                i++
-            )
-            {
-                highest =
-                    Math.Max(
-                        highest,
-                        bars.HighPrices[i]
-                    );
-
-
-                lowest =
-                    Math.Min(
-                        lowest,
-                        bars.LowPrices[i]
-                    );
-            }
-
-
-            double close =
-                bars.ClosePrices[index];
-
-
-            if (close > highest)
-                return
-                    "BULLISH BREAKOUT";
-
-
-            if (close < lowest)
-                return
-                    "BEARISH BREAKOUT";
-
-
-            return "NONE";
-        }
-
-
-        // =====================================================
-        // FALSE BREAKOUT
-        // =====================================================
-
-        private string FalseBreakout(
-            Bars bars,
-            int index,
-            int lookback
-        )
-        {
-            if (
-                index <
-                lookback + 2
-            )
-                return "NONE";
-
-
-            double highest =
-                double.MinValue;
-
-            double lowest =
-                double.MaxValue;
-
-
-            for (
-                int i =
-                    index -
-                    lookback -
-                    1;
-                i < index - 1;
-                i++
-            )
-            {
-                highest =
-                    Math.Max(
-                        highest,
-                        bars.HighPrices[i]
-                    );
-
-
-                lowest =
-                    Math.Min(
-                        lowest,
-                        bars.LowPrices[i]
-                    );
-            }
-
-
-            if (
-                bars.HighPrices[
-                    index - 1
-                ]
-                >
-                highest
-                &&
-                bars.ClosePrices[index]
-                <
-                highest
-            )
-                return
-                    "BULLISH TRAP";
-
-
-            if (
-                bars.LowPrices[
-                    index - 1
-                ]
-                <
-                lowest
-                &&
-                bars.ClosePrices[index]
-                >
-                lowest
-            )
-                return
-                    "BEARISH TRAP";
-
-
-            return "NONE";
-        }
-
-
-        // =====================================================
-        // CANDLE PATTERN
-        // =====================================================
-
-        private string CandlePattern(
-            Bars bars,
-            int index
-        )
-        {
-            if (index < 1)
-                return "NONE";
-
-
-            double open =
-                bars.OpenPrices[index];
-
-            double close =
-                bars.ClosePrices[index];
-
-            double high =
-                bars.HighPrices[index];
-
-            double low =
-                bars.LowPrices[index];
-
-
-            double previousOpen =
-                bars.OpenPrices[
-                    index - 1
-                ];
-
-            double previousClose =
-                bars.ClosePrices[
-                    index - 1
-                ];
-
-
-            if (
-                previousClose <
-                previousOpen
-                &&
-                close >
-                open
-                &&
-                close >=
-                previousOpen
-                &&
-                open <=
-                previousClose
-            )
-                return
-                    "BULLISH ENGULFING";
-
-
-            if (
-                previousClose >
-                previousOpen
-                &&
-                close <
-                open
-                &&
-                close <=
-                previousOpen
-                &&
-                open >=
-                previousClose
-            )
-                return
-                    "BEARISH ENGULFING";
-
-
-            double body =
-                Math.Abs(
-                    close -
-                    open
-                );
-
-
-            double lowerWick =
-                Math.Min(
-                    open,
-                    close
-                )
-                -
-                low;
-
-
-            double upperWick =
-                high
-                -
-                Math.Max(
-                    open,
-                    close
-                );
-
-
-            if (
-                body > 0 &&
-                lowerWick >
-                body * 2
-            )
-                return
-                    "BULLISH REJECTION";
-
-
-            if (
-                body > 0 &&
-                upperWick >
-                body * 2
-            )
-                return
-                    "BEARISH REJECTION";
-
-
-            return "NONE";
-        }
-
-
-        // =====================================================
-        // GET CLOSES
-        // =====================================================
-
-        private double[] GetCloses(
-            Bars bars,
-            int index,
-            int amount
-        )
-        {
-            int start =
-                Math.Max(
-                    0,
-                    index -
-                    amount +
-                    1
-                );
-
-
-            List<double> values =
-                new List<double>();
-
-
-            for (
-                int i = start;
-                i <= index;
-                i++
-            )
-            {
-                values.Add(
-                    bars.ClosePrices[i]
-                );
-            }
-
-
-            return
-                values.ToArray();
-        }
-
-
-        // =====================================================
-        // STOP
-        // =====================================================
 
         protected override void OnStop()
         {
-            Positions.Closed -=
-                OnPositionClosed;
-
             Timer.Stop();
-
-            Chart.RemoveObject(
-                "LIVE_SIGNAL"
-            );
-
-            Chart.RemoveObject(
-                "LIVE_SIGNAL_ARROW"
-            );
-
-            Chart.RemoveObject(
-                "LIVE_SIGNAL_PRICE"
-            );
-
-            Chart.RemoveObject(
-                "BOT_STATUS"
-            );
-
-            Print(
-                "XAUUSD bot stopped."
-            );
-        }
-
-
-        // =====================================================
-        // DATA CLASSES
-        // =====================================================
-
-        private class TfAnalysis
-        {
-            public double Price;
-
-            public double Ema9;
-            public double Ema20;
-            public double Ema50;
-            public double Ema200;
-
-            public double Rsi;
-
-            public double MacdHistogram;
-
-            public double Atr;
-
-            public double Momentum;
-
-            public double Volatility;
-
-            public double Vwap;
-
-            public double RelativeVolume;
-
-            public StructureResult Structure;
-
-            public string Breakout;
-
-            public string FalseBreakout;
-
-            public string CandlePattern;
-
-            public string Trend;
-
-            public string Regime;
-
-            public int BullPoints;
-
-            public int BearPoints;
-        }
-
-
-        private class StructureResult
-        {
-            public string Trend;
-
-            public string Bos;
-
-            public double? LastHigh;
-
-            public double? LastLow;
-        }
-
-
-        private class SignalData
-        {
-            public string Signal;
-
-            public int BuyScore;
-
-            public int SellScore;
-
-            public int RequiredScore;
-
-            public int Confidence;
-        }
-
-
-        private class TradeLevels
-        {
-            public double? Entry;
-
-            public double? StopLoss;
-
-            public double? TakeProfit;
-
-            public double? Tp1;
-
-            public double? Tp2;
-
-            public double RiskDistance;
+            Chart.RemoveObject("LIVE_SIGNAL");
+            Chart.RemoveObject("BOT_STATUS");
+            Print("Gold AI Trading Bot stopped.");
         }
     }
 }
