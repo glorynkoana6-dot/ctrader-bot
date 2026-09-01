@@ -6,17 +6,13 @@ using cAlgo.API;
 namespace cAlgo.Robots
 {
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-    public class XAUUSD_10S_30S_1M_HyperScalper : Robot
+    public class EURUSD_10S_30S_1M_HyperScalper : Robot
     {
-        // =====================================================
-        // TRADING
-        // =====================================================
-
         [Parameter("Enable Real Trading", DefaultValue = false)]
         public bool EnableRealTrading { get; set; }
 
-        [Parameter("Volume In Units", DefaultValue = 100, MinValue = 1)]
-        public double VolumeInUnits { get; set; }
+        [Parameter("Volume Lots", DefaultValue = 0.01, MinValue = 0.01)]
+        public double VolumeLots { get; set; }
 
         [Parameter("Maximum Trades Per Day", DefaultValue = 1000, MinValue = 1)]
         public int MaximumTradesPerDay { get; set; }
@@ -33,21 +29,11 @@ namespace cAlgo.Robots
         [Parameter("One Batch Per 10s Bar", DefaultValue = true)]
         public bool OneBatchPer10SecondBar { get; set; }
 
-
-        // =====================================================
-        // SIGNAL
-        // =====================================================
-
         [Parameter("Minimum Signal Score", DefaultValue = 70, MinValue = 1)]
         public int MinimumSignalScore { get; set; }
 
         [Parameter("Minimum Score Difference", DefaultValue = 12, MinValue = 1)]
         public int MinimumScoreDifference { get; set; }
-
-
-        // =====================================================
-        // PROFIT EXIT
-        // =====================================================
 
         [Parameter("Close Profit Pips", DefaultValue = 1.0, MinValue = 0.1)]
         public double CloseProfitPips { get; set; }
@@ -58,26 +44,16 @@ namespace cAlgo.Robots
         [Parameter("Maximum Hold Minutes", DefaultValue = 20, MinValue = 1)]
         public int MaximumHoldMinutes { get; set; }
 
-
-        // =====================================================
-        // PROTECTION
-        // =====================================================
-
         [Parameter("Emergency SL ATR", DefaultValue = 3.0, MinValue = 0.5)]
         public double EmergencyStopAtrMultiplier { get; set; }
 
-        [Parameter("Minimum Emergency SL Pips", DefaultValue = 20, MinValue = 1)]
+        [Parameter("Minimum Emergency SL Pips", DefaultValue = 5, MinValue = 1)]
         public double MinimumEmergencyStopPips { get; set; }
 
-        [Parameter("Maximum Spread Pips", DefaultValue = 20, MinValue = 0)]
+        [Parameter("Maximum Spread Pips", DefaultValue = 2.0, MinValue = 0)]
         public double MaximumSpreadPips { get; set; }
 
-
-        // =====================================================
-        // INTERNAL
-        // =====================================================
-
-        private const string Label = "XAU_10S_30S_HYPER";
+        private const string Label = "EURUSD_10S_30S_HYPER";
 
         private Bars _m1;
 
@@ -99,11 +75,6 @@ namespace cAlgo.Robots
 
         private int _tradesToday;
 
-
-        // =====================================================
-        // START
-        // =====================================================
-
         protected override void OnStart()
         {
             string cleanSymbol =
@@ -114,16 +85,10 @@ namespace cAlgo.Robots
                 .Replace(".", "")
                 .Replace("_", "");
 
-            bool gold =
-                cleanSymbol.Contains("XAU") ||
-                cleanSymbol.Contains("GOLD");
-
-            if (!gold)
+            if (!cleanSymbol.Contains("EURUSD"))
             {
-                Print("ERROR: Run this robot on XAUUSD / GOLD only.");
-
+                Print("ERROR: EURUSD ONLY");
                 Stop();
-
                 return;
             }
 
@@ -141,34 +106,24 @@ namespace cAlgo.Robots
 
             Timer.Start(1);
 
-            Print("==================================================");
-            Print("XAUUSD 10 SECOND / 30 SECOND / 1 MINUTE SCALPER");
+            Print("==============================================");
+            Print("EURUSD 10S / 30S / 1M HYPER SCALPER");
             Print("1M  = MAIN DIRECTION");
             Print("30S = CONFIRMATION");
             Print("10S = ENTRY");
-            Print("MAX DAILY TRADES: {0}", MaximumTradesPerDay);
-            Print("MAX OPEN POSITIONS: {0}", MaximumOpenPositions);
-            Print("ORDERS PER BATCH: {0}", OrdersPerBatch);
-            Print("REAL TRADING: {0}", EnableRealTrading);
-            Print("==================================================");
+            Print("LOTS = {0}", VolumeLots);
+            Print("MAX DAILY = {0}", MaximumTradesPerDay);
+            Print("MAX OPEN = {0}", MaximumOpenPositions);
+            Print("REAL TRADING = {0}", EnableRealTrading);
+            Print("==============================================");
         }
-
-
-        // =====================================================
-        // TICK
-        // =====================================================
 
         protected override void OnTick()
         {
             ResetDailyCounter();
 
             double midPrice =
-                (
-                    Symbol.Bid +
-                    Symbol.Ask
-                )
-                /
-                2.0;
+                (Symbol.Bid + Symbol.Ask) / 2.0;
 
             UpdateSyntheticBar(
                 10,
@@ -186,13 +141,10 @@ namespace cAlgo.Robots
                 midPrice
             );
 
-            // Avoid doing the entire calculation on every single tick.
             if (
                 _lastAnalysisTime != DateTime.MinValue &&
-                (
-                    Server.Time -
-                    _lastAnalysisTime
-                ).TotalMilliseconds < 250
+                (Server.Time - _lastAnalysisTime)
+                .TotalMilliseconds < 250
             )
                 return;
 
@@ -204,22 +156,11 @@ namespace cAlgo.Robots
             AnalyseAndTrade();
         }
 
-
-        // =====================================================
-        // TIMER
-        // =====================================================
-
         protected override void OnTimer()
         {
             ResetDailyCounter();
-
             ManageOpenPositions();
         }
-
-
-        // =====================================================
-        // BUILD 10 SECOND / 30 SECOND BARS
-        // =====================================================
 
         private void UpdateSyntheticBar(
             int seconds,
@@ -236,10 +177,7 @@ namespace cAlgo.Robots
 
             long bucketTicks =
                 time.Ticks -
-                (
-                    time.Ticks %
-                    intervalTicks
-                );
+                (time.Ticks % intervalTicks);
 
             DateTime bucketStart =
                 new DateTime(
@@ -258,23 +196,12 @@ namespace cAlgo.Robots
                 return;
             }
 
-            // New bar.
-            if (
-                bucketStart >
-                current.Start
-            )
+            if (bucketStart > current.Start)
             {
-                completedBars.Add(
-                    current
-                );
+                completedBars.Add(current);
 
-                if (
-                    completedBars.Count >
-                    300
-                )
-                {
+                if (completedBars.Count > 300)
                     completedBars.RemoveAt(0);
-                }
 
                 current =
                     CreateSyntheticBar(
@@ -303,7 +230,6 @@ namespace cAlgo.Robots
             current.Ticks++;
         }
 
-
         private SyntheticBar CreateSyntheticBar(
             DateTime start,
             double price
@@ -320,22 +246,14 @@ namespace cAlgo.Robots
             };
         }
 
-
-        // =====================================================
-        // MAIN ANALYSIS
-        // =====================================================
-
         private void AnalyseAndTrade()
         {
             if (_m1 == null)
                 return;
 
-            // Enough M1 history for EMA50 etc.
             if (_m1.Count < 70)
                 return;
 
-            // 30s/10s bars are constructed from live ticks.
-            // This gives them a short warm-up after the bot starts.
             if (
                 _bars30s.Count < 2 ||
                 _bars10s.Count < 4 ||
@@ -344,21 +262,8 @@ namespace cAlgo.Robots
             )
                 return;
 
-
-            // =================================================
-            // DAILY LIMIT
-            // =================================================
-
-            if (
-                _tradesToday >=
-                MaximumTradesPerDay
-            )
+            if (_tradesToday >= MaximumTradesPerDay)
                 return;
-
-
-            // =================================================
-            // OPEN POSITION LIMIT
-            // =================================================
 
             Position[] positions =
                 Positions.FindAll(
@@ -372,25 +277,12 @@ namespace cAlgo.Robots
             )
                 return;
 
-
-            // =================================================
-            // BATCH SPACING
-            // =================================================
-
             if (
-                (
-                    Server.Time -
-                    _lastBatchTime
-                ).TotalSeconds
-                <
+                (Server.Time - _lastBatchTime)
+                .TotalSeconds <
                 MinimumBatchSpacingSeconds
             )
                 return;
-
-
-            // =================================================
-            // OPTIONAL ONE BATCH PER 10 SECOND BAR
-            // =================================================
 
             if (
                 OneBatchPer10SecondBar &&
@@ -399,17 +291,8 @@ namespace cAlgo.Robots
             )
                 return;
 
-
-            // =================================================
-            // SPREAD
-            // =================================================
-
             double spreadPips =
-                (
-                    Symbol.Ask -
-                    Symbol.Bid
-                )
-                /
+                (Symbol.Ask - Symbol.Bid) /
                 Symbol.PipSize;
 
             if (
@@ -418,18 +301,8 @@ namespace cAlgo.Robots
             )
                 return;
 
-
-            // =================================================
-            // 1 MINUTE ANALYSIS
-            // =================================================
-
             MainAnalysis m1 =
                 AnalyseOneMinute();
-
-
-            // =================================================
-            // 30 SECOND CONFIRMATION
-            // =================================================
 
             FastAnalysis s30 =
                 AnalyseFastBars(
@@ -438,11 +311,6 @@ namespace cAlgo.Robots
                     8
                 );
 
-
-            // =================================================
-            // 10 SECOND ENTRY
-            // =================================================
-
             FastAnalysis s10 =
                 AnalyseFastBars(
                     _bars10s,
@@ -450,73 +318,33 @@ namespace cAlgo.Robots
                     15
                 );
 
-
-            // =================================================
-            // SCORE
-            // =================================================
-
             int buyScore = 0;
             int sellScore = 0;
 
-
-            // ---------------------------------------------
-            // 1M = 40 POINTS
-            // ---------------------------------------------
-
             if (m1.Direction == "BUY")
                 buyScore += 40;
-
             else if (m1.Direction == "SELL")
                 sellScore += 40;
 
-
-            // ---------------------------------------------
-            // 30S = 30 POINTS
-            // ---------------------------------------------
-
             if (s30.Direction == "BUY")
                 buyScore += 30;
-
             else if (s30.Direction == "SELL")
                 sellScore += 30;
 
-
-            // ---------------------------------------------
-            // 10S = 25 POINTS
-            // ---------------------------------------------
-
             if (s10.Direction == "BUY")
                 buyScore += 25;
-
             else if (s10.Direction == "SELL")
                 sellScore += 25;
 
-
-            // ---------------------------------------------
-            // 10S BREAKOUT
-            // ---------------------------------------------
-
             if (s10.Breakout == "BUY")
                 buyScore += 10;
-
             else if (s10.Breakout == "SELL")
                 sellScore += 10;
 
-
-            // ---------------------------------------------
-            // 30S BREAKOUT
-            // ---------------------------------------------
-
             if (s30.Breakout == "BUY")
                 buyScore += 5;
-
             else if (s30.Breakout == "SELL")
                 sellScore += 5;
-
-
-            // ---------------------------------------------
-            // FULL ALIGNMENT BONUS
-            // ---------------------------------------------
 
             if (
                 m1.Direction == "BUY" &&
@@ -536,11 +364,6 @@ namespace cAlgo.Robots
                 sellScore += 15;
             }
 
-
-            // ---------------------------------------------
-            // CURRENT 10 SECOND CANDLE STRENGTH
-            // ---------------------------------------------
-
             double range10 =
                 _current10s.High -
                 _current10s.Low;
@@ -559,31 +382,20 @@ namespace cAlgo.Robots
                     body10 > 0 &&
                     strength10 >= 0.60
                 )
-                {
                     buyScore += 8;
-                }
 
                 else if (
                     body10 < 0 &&
                     strength10 >= 0.60
                 )
-                {
                     sellScore += 8;
-                }
             }
-
-
-            // =================================================
-            // SIGNAL
-            // =================================================
 
             string signal =
                 "WAIT";
 
             if (
-                buyScore >=
-                MinimumSignalScore
-                &&
+                buyScore >= MinimumSignalScore &&
                 buyScore >=
                 sellScore +
                 MinimumScoreDifference
@@ -593,9 +405,7 @@ namespace cAlgo.Robots
             }
 
             else if (
-                sellScore >=
-                MinimumSignalScore
-                &&
+                sellScore >= MinimumSignalScore &&
                 sellScore >=
                 buyScore +
                 MinimumScoreDifference
@@ -604,8 +414,6 @@ namespace cAlgo.Robots
                 signal = "SELL";
             }
 
-
-            // Print once per new 10s candle instead of every tick.
             if (
                 _lastPrinted10SecondBar !=
                 _current10s.Start
@@ -615,7 +423,7 @@ namespace cAlgo.Robots
                     _current10s.Start;
 
                 Print(
-                    "1M {0} | 30S {1} | 10S {2} | BUY {3} | SELL {4} | SIGNAL {5} | OPEN {6}/{7} | DAY {8}/{9}",
+                    "1M {0} | 30S {1} | 10S {2} | BUY {3} | SELL {4} | {5} | OPEN {6}/{7} | DAY {8}/{9}",
                     m1.Direction,
                     s30.Direction,
                     s10.Direction,
@@ -629,43 +437,24 @@ namespace cAlgo.Robots
                 );
             }
 
-
-            if (
-                signal ==
-                "WAIT"
-            )
+            if (signal == "WAIT")
                 return;
-
-
-            // =================================================
-            // SIGNAL MODE
-            // =================================================
 
             if (!EnableRealTrading)
             {
                 Print(
-                    "SIGNAL: {0} | Real trading is OFF.",
+                    "SIGNAL {0} - REAL TRADING OFF",
                     signal
                 );
 
                 return;
             }
 
-
-            // =================================================
-            // OPEN BATCH
-            // =================================================
-
             OpenBatch(
                 signal,
                 m1.Atr
             );
         }
-
-
-        // =====================================================
-        // 1 MINUTE ANALYSIS
-        // =====================================================
 
         private MainAnalysis AnalyseOneMinute()
         {
@@ -685,34 +474,19 @@ namespace cAlgo.Robots
                 ];
 
             double ema9 =
-                EMA(
-                    closes,
-                    9
-                );
+                EMA(closes, 9);
 
             double ema20 =
-                EMA(
-                    closes,
-                    20
-                );
+                EMA(closes, 20);
 
             double ema50 =
-                EMA(
-                    closes,
-                    50
-                );
+                EMA(closes, 50);
 
             double rsi =
-                RSI(
-                    closes,
-                    14
-                );
+                RSI(closes, 14);
 
             double momentum =
-                Momentum(
-                    closes,
-                    10
-                );
+                Momentum(closes, 10);
 
             double atr =
                 ATR(
@@ -724,52 +498,20 @@ namespace cAlgo.Robots
             int buy = 0;
             int sell = 0;
 
-
-            // =================================================
-            // EMA 9 / 20
-            // =================================================
-
-            if (
-                ema9 >
-                ema20
-            )
+            if (ema9 > ema20)
                 buy += 20;
-
             else
                 sell += 20;
 
-
-            // =================================================
-            // EMA 20 / 50
-            // =================================================
-
-            if (
-                ema20 >
-                ema50
-            )
+            if (ema20 > ema50)
                 buy += 25;
-
             else
                 sell += 25;
 
-
-            // =================================================
-            // PRICE VS EMA 20
-            // =================================================
-
-            if (
-                current >
-                ema20
-            )
+            if (current > ema20)
                 buy += 15;
-
             else
                 sell += 15;
-
-
-            // =================================================
-            // RSI
-            // =================================================
 
             if (
                 rsi >= 52 &&
@@ -783,27 +525,11 @@ namespace cAlgo.Robots
             )
                 sell += 15;
 
-
-            // =================================================
-            // MOMENTUM
-            // =================================================
-
-            if (
-                momentum >
-                0
-            )
+            if (momentum > 0)
                 buy += 15;
 
-            else if (
-                momentum <
-                0
-            )
+            else if (momentum < 0)
                 sell += 15;
-
-
-            // =================================================
-            // LAST COMPLETED M1 CANDLE
-            // =================================================
 
             double candleOpen =
                 _m1.OpenPrices[index];
@@ -811,36 +537,20 @@ namespace cAlgo.Robots
             double candleClose =
                 _m1.ClosePrices[index];
 
-            if (
-                candleClose >
-                candleOpen
-            )
+            if (candleClose > candleOpen)
                 buy += 10;
 
-            else if (
-                candleClose <
-                candleOpen
-            )
+            else if (candleClose < candleOpen)
                 sell += 10;
-
 
             string direction =
                 "NEUTRAL";
 
-
-            if (
-                buy >=
-                sell + 15
-            )
+            if (buy >= sell + 15)
                 direction = "BUY";
 
-
-            else if (
-                sell >=
-                buy + 15
-            )
+            else if (sell >= buy + 15)
                 direction = "SELL";
-
 
             return new MainAnalysis
             {
@@ -852,11 +562,6 @@ namespace cAlgo.Robots
                 Atr = atr
             };
         }
-
-
-        // =====================================================
-        // 10 SECOND / 30 SECOND ANALYSIS
-        // =====================================================
 
         private FastAnalysis AnalyseFastBars(
             List<SyntheticBar> completed,
@@ -886,41 +591,24 @@ namespace cAlgo.Robots
             }
 
             if (current != null)
-            {
-                bars.Add(
-                    current
-                );
-            }
+                bars.Add(current);
 
-
-            if (
-                bars.Count <
-                3
-            )
+            if (bars.Count < 3)
             {
                 return new FastAnalysis
                 {
                     Direction = "NEUTRAL",
-                    Breakout = "NONE",
-                    BuyScore = 0,
-                    SellScore = 0
+                    Breakout = "NONE"
                 };
             }
 
-
             int buy = 0;
             int sell = 0;
-
 
             SyntheticBar latest =
                 bars[
                     bars.Count - 1
                 ];
-
-
-            // =================================================
-            // RECENT PRICE MOMENTUM
-            // =================================================
 
             int momentumIndex =
                 Math.Max(
@@ -937,21 +625,11 @@ namespace cAlgo.Robots
                 latest.Close -
                 oldClose;
 
-
-            if (
-                momentum > 0
-            )
+            if (momentum > 0)
                 buy += 30;
 
-            else if (
-                momentum < 0
-            )
+            else if (momentum < 0)
                 sell += 30;
-
-
-            // =================================================
-            // SHORT AVERAGE
-            // =================================================
 
             int averageStart =
                 Math.Max(
@@ -959,12 +637,8 @@ namespace cAlgo.Robots
                     bars.Count - 5
                 );
 
-            double average =
-                0;
-
-            int averageCount =
-                0;
-
+            double average = 0;
+            int averageCount = 0;
 
             for (
                 int i = averageStart;
@@ -978,88 +652,51 @@ namespace cAlgo.Robots
                 averageCount++;
             }
 
-
-            if (
-                averageCount > 0
-            )
+            if (averageCount > 0)
             {
                 average /=
                     averageCount;
 
-
-                if (
-                    latest.Close >
-                    average
-                )
+                if (latest.Close > average)
                     buy += 25;
 
-                else if (
-                    latest.Close <
-                    average
-                )
+                else if (latest.Close < average)
                     sell += 25;
             }
 
-
-            // =================================================
-            // CURRENT CANDLE
-            // =================================================
-
-            double currentBody =
+            double body =
                 latest.Close -
                 latest.Open;
 
-            double currentRange =
+            double range =
                 latest.High -
                 latest.Low;
 
-
-            if (
-                currentRange > 0
-            )
+            if (range > 0)
             {
                 double strength =
-                    Math.Abs(
-                        currentBody
-                    )
-                    /
-                    currentRange;
+                    Math.Abs(body) /
+                    range;
 
-
-                if (
-                    currentBody > 0
-                )
+                if (body > 0)
                 {
                     buy += 10;
 
-                    if (
-                        strength >= 0.60
-                    )
+                    if (strength >= 0.60)
                         buy += 15;
                 }
 
-
-                else if (
-                    currentBody < 0
-                )
+                else if (body < 0)
                 {
                     sell += 10;
 
-                    if (
-                        strength >= 0.60
-                    )
+                    if (strength >= 0.60)
                         sell += 15;
                 }
             }
 
-
-            // =================================================
-            // LAST 3 BAR DIRECTION
-            // =================================================
-
-            int bullishBars = 0;
-            int bearishBars = 0;
-
+            int bullish = 0;
+            int bearish = 0;
 
             for (
                 int i =
@@ -1075,40 +712,25 @@ namespace cAlgo.Robots
                     bars[i].Close >
                     bars[i].Open
                 )
-                    bullishBars++;
-
+                    bullish++;
 
                 else if (
                     bars[i].Close <
                     bars[i].Open
                 )
-                    bearishBars++;
+                    bearish++;
             }
 
-
-            if (
-                bullishBars >= 2
-            )
+            if (bullish >= 2)
                 buy += 15;
 
-
-            if (
-                bearishBars >= 2
-            )
+            if (bearish >= 2)
                 sell += 15;
-
-
-            // =================================================
-            // BREAKOUT
-            // =================================================
 
             string breakout =
                 "NONE";
 
-
-            if (
-                bars.Count >= 4
-            )
+            if (bars.Count >= 4)
             {
                 double previousHigh =
                     double.MinValue;
@@ -1116,15 +738,12 @@ namespace cAlgo.Robots
                 double previousLow =
                     double.MaxValue;
 
-
                 int breakoutStart =
                     Math.Max(
                         0,
                         bars.Count - 6
                     );
 
-
-                // Exclude the latest bar.
                 for (
                     int i = breakoutStart;
                     i < bars.Count - 1;
@@ -1137,7 +756,6 @@ namespace cAlgo.Robots
                             bars[i].High
                         );
 
-
                     previousLow =
                         Math.Min(
                             previousLow,
@@ -1145,55 +763,33 @@ namespace cAlgo.Robots
                         );
                 }
 
-
                 if (
                     latest.Close >
                     previousHigh
                 )
                 {
-                    breakout =
-                        "BUY";
-
+                    breakout = "BUY";
                     buy += 15;
                 }
-
 
                 else if (
                     latest.Close <
                     previousLow
                 )
                 {
-                    breakout =
-                        "SELL";
-
+                    breakout = "SELL";
                     sell += 15;
                 }
             }
 
-
-            // =================================================
-            // DIRECTION
-            // =================================================
-
             string direction =
                 "NEUTRAL";
 
+            if (buy >= sell + 10)
+                direction = "BUY";
 
-            if (
-                buy >=
-                sell + 10
-            )
-                direction =
-                    "BUY";
-
-
-            else if (
-                sell >=
-                buy + 10
-            )
-                direction =
-                    "SELL";
-
+            else if (sell >= buy + 10)
+                direction = "SELL";
 
             return new FastAnalysis
             {
@@ -1204,21 +800,13 @@ namespace cAlgo.Robots
             };
         }
 
-
-        // =====================================================
-        // OPEN BATCH
-        // =====================================================
-
         private void OpenBatch(
             string signal,
             double atr
         )
         {
-            if (
-                atr <= 0
-            )
+            if (atr <= 0)
                 return;
-
 
             int open =
                 Positions.FindAll(
@@ -1226,16 +814,13 @@ namespace cAlgo.Robots
                     SymbolName
                 ).Length;
 
-
             int availableSlots =
                 MaximumOpenPositions -
                 open;
 
-
             int remainingDaily =
                 MaximumTradesPerDay -
                 _tradesToday;
-
 
             int orders =
                 Math.Min(
@@ -1246,35 +831,21 @@ namespace cAlgo.Robots
                     )
                 );
 
-
-            if (
-                orders <= 0
-            )
+            if (orders <= 0)
                 return;
 
-
             TradeType type =
-                signal ==
-                "BUY"
-                ?
-                TradeType.Buy
-                :
-                TradeType.Sell;
-
-
-            // =================================================
-            // EMERGENCY SL
-            // =================================================
-
-            double emergencyDistance =
-                atr *
-                EmergencyStopAtrMultiplier;
-
+                signal == "BUY"
+                ? TradeType.Buy
+                : TradeType.Sell;
 
             double emergencyPips =
-                emergencyDistance /
+                (
+                    atr *
+                    EmergencyStopAtrMultiplier
+                )
+                /
                 Symbol.PipSize;
-
 
             emergencyPips =
                 Math.Max(
@@ -1282,17 +853,16 @@ namespace cAlgo.Robots
                     MinimumEmergencyStopPips
                 );
 
-
-            // =================================================
-            // VOLUME
-            // =================================================
-
             double volume =
-                Symbol.NormalizeVolumeInUnits(
-                    VolumeInUnits,
-                    RoundingMode.Down
+                Symbol.QuantityToVolumeInUnits(
+                    VolumeLots
                 );
 
+            volume =
+                Symbol.NormalizeVolumeInUnits(
+                    volume,
+                    RoundingMode.Down
+                );
 
             volume =
                 Math.Max(
@@ -1300,21 +870,13 @@ namespace cAlgo.Robots
                     Symbol.VolumeInUnitsMin
                 );
 
-
             volume =
                 Math.Min(
                     volume,
                     Symbol.VolumeInUnitsMax
                 );
 
-
-            int opened =
-                0;
-
-
-            // =================================================
-            // EXECUTE ORDERS
-            // =================================================
+            int opened = 0;
 
             for (
                 int i = 0;
@@ -1332,27 +894,22 @@ namespace cAlgo.Robots
                         null
                     );
 
-
-                if (
-                    result.IsSuccessful
-                )
+                if (result.IsSuccessful)
                 {
                     opened++;
 
                     _tradesToday++;
 
-
                     Print(
-                        "🔥 {0} OPENED | ID {1} | ENTRY {2} | DAILY {3}/{4}",
+                        "{0} OPEN | ID {1} | ENTRY {2} | LOTS {3} | DAY {4}/{5}",
                         signal,
                         result.Position.Id,
                         result.Position.EntryPrice,
+                        VolumeLots,
                         _tradesToday,
                         MaximumTradesPerDay
                     );
                 }
-
-
                 else
                 {
                     Print(
@@ -1361,13 +918,11 @@ namespace cAlgo.Robots
                     );
                 }
 
-
                 if (
                     _tradesToday >=
                     MaximumTradesPerDay
                 )
                     break;
-
 
                 if (
                     Positions.FindAll(
@@ -1379,29 +934,18 @@ namespace cAlgo.Robots
                     break;
             }
 
-
-            if (
-                opened > 0
-            )
+            if (opened > 0)
             {
                 _lastBatchTime =
                     Server.Time;
 
-
-                if (
-                    _current10s != null
-                )
+                if (_current10s != null)
                 {
                     _lastBatch10SecondBar =
                         _current10s.Start;
                 }
             }
         }
-
-
-        // =====================================================
-        // CLOSE AT NEAREST PROFIT
-        // =====================================================
 
         private void ManageOpenPositions()
         {
@@ -1411,16 +955,11 @@ namespace cAlgo.Robots
                     SymbolName
                 );
 
-
             foreach (
                 Position position
                 in positions
             )
             {
-                // =================================================
-                // SMALL PROFIT EXIT
-                // =================================================
-
                 if (
                     position.Pips >=
                     CloseProfitPips
@@ -1434,34 +973,24 @@ namespace cAlgo.Robots
                             position
                         );
 
-
-                    if (
-                        close.IsSuccessful
-                    )
+                    if (close.IsSuccessful)
                     {
                         Print(
-                            "💰 PROFIT CLOSED | ID {0} | PIPS {1:F2} | NET {2:F2}",
+                            "PROFIT CLOSED | ID {0} | PIPS {1:F2} | NET {2:F2}",
                             position.Id,
                             position.Pips,
                             position.NetProfit
                         );
                     }
 
-
                     continue;
                 }
-
-
-                // =================================================
-                // OLD POSITION
-                // =================================================
 
                 double ageMinutes =
                     (
                         Server.Time -
                         position.EntryTime
                     ).TotalMinutes;
-
 
                 if (
                     ageMinutes >=
@@ -1478,40 +1007,22 @@ namespace cAlgo.Robots
             }
         }
 
-
-        // =====================================================
-        // EMA
-        // =====================================================
-
         private double EMA(
             double[] values,
             int period
         )
         {
-            if (
-                values.Length <
-                period
-            )
-            {
-                return values[
-                    values.Length - 1
-                ];
-            }
-
+            if (values.Length < period)
+                return values[values.Length - 1];
 
             double value =
                 values
                 .Take(period)
                 .Average();
 
-
             double multiplier =
                 2.0 /
-                (
-                    period +
-                    1
-                );
-
+                (period + 1);
 
             for (
                 int i = period;
@@ -1530,14 +1041,8 @@ namespace cAlgo.Robots
                     value;
             }
 
-
             return value;
         }
-
-
-        // =====================================================
-        // RSI
-        // =====================================================
 
         private double RSI(
             double[] closes,
@@ -1550,10 +1055,8 @@ namespace cAlgo.Robots
             )
                 return 50;
 
-
             double gain = 0;
             double loss = 0;
-
 
             for (
                 int i = 1;
@@ -1565,28 +1068,14 @@ namespace cAlgo.Robots
                     closes[i] -
                     closes[i - 1];
 
-
-                if (
-                    change > 0
-                )
-                {
-                    gain +=
-                        change;
-                }
+                if (change > 0)
+                    gain += change;
                 else
-                {
-                    loss +=
-                        -change;
-                }
+                    loss += -change;
             }
 
-
-            gain /=
-                period;
-
-            loss /=
-                period;
-
+            gain /= period;
+            loss /= period;
 
             for (
                 int i =
@@ -1599,13 +1088,11 @@ namespace cAlgo.Robots
                     closes[i] -
                     closes[i - 1];
 
-
                 double currentGain =
                     Math.Max(
                         change,
                         0
                     );
-
 
                 double currentLoss =
                     Math.Max(
@@ -1613,28 +1100,20 @@ namespace cAlgo.Robots
                         0
                     );
 
-
                 gain =
                     (
                         gain *
-                        (
-                            period -
-                            1
-                        )
+                        (period - 1)
                         +
                         currentGain
                     )
                     /
                     period;
 
-
                 loss =
                     (
                         loss *
-                        (
-                            period -
-                            1
-                        )
+                        (period - 1)
                         +
                         currentLoss
                     )
@@ -1642,33 +1121,19 @@ namespace cAlgo.Robots
                     period;
             }
 
-
-            if (
-                loss == 0
-            )
+            if (loss == 0)
                 return 100;
 
-
             double rs =
-                gain /
-                loss;
-
+                gain / loss;
 
             return
                 100 -
                 (
                     100 /
-                    (
-                        1 +
-                        rs
-                    )
+                    (1 + rs)
                 );
         }
-
-
-        // =====================================================
-        // MOMENTUM
-        // =====================================================
 
         private double Momentum(
             double[] closes,
@@ -1681,7 +1146,6 @@ namespace cAlgo.Robots
             )
                 return 0;
 
-
             double previous =
                 closes[
                     closes.Length -
@@ -1689,37 +1153,24 @@ namespace cAlgo.Robots
                     1
                 ];
 
-
             double current =
                 closes[
                     closes.Length -
                     1
                 ];
 
-
-            if (
-                previous == 0
-            )
+            if (previous == 0)
                 return 0;
-
 
             return
                 (
-                    (
-                        current -
-                        previous
-                    )
+                    (current - previous)
                     /
                     previous
                 )
                 *
                 100;
         }
-
-
-        // =====================================================
-        // ATR
-        // =====================================================
 
         private double ATR(
             Bars bars,
@@ -1733,19 +1184,15 @@ namespace cAlgo.Robots
             )
                 return 0;
 
-
             List<double> ranges =
                 new List<double>();
-
 
             int start =
                 Math.Max(
                     1,
                     index -
-                    period *
-                    4
+                    period * 4
                 );
-
 
             for (
                 int i = start;
@@ -1757,7 +1204,6 @@ namespace cAlgo.Robots
                     bars.HighPrices[i] -
                     bars.LowPrices[i];
 
-
                 double highClose =
                     Math.Abs(
                         bars.HighPrices[i] -
@@ -1766,7 +1212,6 @@ namespace cAlgo.Robots
                         ]
                     );
 
-
                 double lowClose =
                     Math.Abs(
                         bars.LowPrices[i] -
@@ -1774,7 +1219,6 @@ namespace cAlgo.Robots
                             i - 1
                         ]
                     );
-
 
                 ranges.Add(
                     Math.Max(
@@ -1787,19 +1231,16 @@ namespace cAlgo.Robots
                 );
             }
 
-
             if (
                 ranges.Count <
                 period
             )
                 return 0;
 
-
             double atr =
                 ranges
                 .Take(period)
                 .Average();
-
 
             for (
                 int i = period;
@@ -1810,10 +1251,7 @@ namespace cAlgo.Robots
                 atr =
                     (
                         atr *
-                        (
-                            period -
-                            1
-                        )
+                        (period - 1)
                         +
                         ranges[i]
                     )
@@ -1821,14 +1259,8 @@ namespace cAlgo.Robots
                     period;
             }
 
-
             return atr;
         }
-
-
-        // =====================================================
-        // M1 CLOSES
-        // =====================================================
 
         private double[] GetCloses(
             Bars bars,
@@ -1844,10 +1276,8 @@ namespace cAlgo.Robots
                     1
                 );
 
-
             List<double> result =
                 new List<double>();
-
 
             for (
                 int i = start;
@@ -1860,21 +1290,13 @@ namespace cAlgo.Robots
                 );
             }
 
-
-            return
-                result.ToArray();
+            return result.ToArray();
         }
-
-
-        // =====================================================
-        // DAILY COUNT
-        // =====================================================
 
         private int CountTradesToday()
         {
             DateTime today =
                 Server.Time.Date;
-
 
             int closed =
                 History.Count(
@@ -1889,7 +1311,6 @@ namespace cAlgo.Robots
                         today
                 );
 
-
             int open =
                 Positions.Count(
                     position =>
@@ -1903,16 +1324,8 @@ namespace cAlgo.Robots
                         today
                 );
 
-
-            return
-                closed +
-                open;
+            return closed + open;
         }
-
-
-        // =====================================================
-        // DAILY RESET
-        // =====================================================
 
         private void ResetDailyCounter()
         {
@@ -1922,82 +1335,53 @@ namespace cAlgo.Robots
             )
                 return;
 
-
             _currentTradingDay =
                 Server.Time.Date;
-
 
             _tradesToday =
                 CountTradesToday();
 
-
             _lastBatchTime =
                 DateTime.MinValue;
-
 
             _lastBatch10SecondBar =
                 DateTime.MinValue;
         }
-
-
-        // =====================================================
-        // STOP
-        // =====================================================
 
         protected override void OnStop()
         {
             Timer.Stop();
 
             Print(
-                "XAUUSD hyper scalper stopped."
+                "EURUSD scalper stopped."
             );
         }
-
-
-        // =====================================================
-        // DATA CLASSES
-        // =====================================================
 
         private class SyntheticBar
         {
             public DateTime Start;
-
             public double Open;
-
             public double High;
-
             public double Low;
-
             public double Close;
-
             public int Ticks;
         }
-
 
         private class MainAnalysis
         {
             public string Direction;
-
             public int BuyScore;
-
             public int SellScore;
-
             public double Rsi;
-
             public double Momentum;
-
             public double Atr;
         }
-
 
         private class FastAnalysis
         {
             public string Direction;
-
             public string Breakout;
-
             public int BuyScore;
-
             public int SellScore;
         }
     }
