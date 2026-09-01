@@ -6,9 +6,13 @@ using cAlgo.API;
 namespace cAlgo.Robots
 {
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-    public class USTEC_Spider_Grid_Bot : Robot
+    public class XAUUSD_Spider_Grid_Bot : Robot
     {
-        private const string Label = "USTEC_SPIDER";
+        private const string Label = "XAUUSD_SPIDER_GRID";
+
+        // =====================================================
+        // SETTINGS
+        // =====================================================
 
         [Parameter("Enable Trading", DefaultValue = false)]
         public bool EnableTrading { get; set; }
@@ -19,57 +23,66 @@ namespace cAlgo.Robots
         [Parameter("Grid Levels Per Side", DefaultValue = 20, MinValue = 1, MaxValue = 50)]
         public int GridLevelsPerSide { get; set; }
 
-        [Parameter("Grid Spacing Price", DefaultValue = 1.50, MinValue = 0.01)]
+        // Gold price spacing:
+        // 0.50 = orders every $0.50
+        [Parameter("Grid Spacing Price", DefaultValue = 0.50, MinValue = 0.01)]
         public double GridSpacingPrice { get; set; }
 
-        [Parameter("Entry Buffer Price", DefaultValue = 0.20, MinValue = 0)]
-        public double EntryBufferPrice { get; set; }
+        [Parameter("First Order Distance", DefaultValue = 0.30, MinValue = 0.01)]
+        public double FirstOrderDistance { get; set; }
 
-        [Parameter("Maximum Open Positions", DefaultValue = 40, MinValue = 1)]
+        [Parameter("Maximum Open Positions", DefaultValue = 40, MinValue = 1, MaxValue = 100)]
         public int MaximumOpenPositions { get; set; }
 
-        [Parameter("Close At Any Net Profit", DefaultValue = true)]
-        public bool CloseAtAnyProfit { get; set; }
-
-        [Parameter("Minimum Net Profit", DefaultValue = 0.0, MinValue = 0)]
+        [Parameter("Minimum Net Profit", DefaultValue = 0.01, MinValue = 0)]
         public double MinimumNetProfit { get; set; }
 
         [Parameter("Maximum Spread Pips", DefaultValue = 100, MinValue = 0)]
         public double MaximumSpreadPips { get; set; }
 
-        [Parameter("Cancel Pending When Stopped", DefaultValue = true)]
-        public bool CancelPendingWhenStopped { get; set; }
+        [Parameter("Recenter Grid", DefaultValue = true)]
+        public bool RecenterGrid { get; set; }
+
+        [Parameter("Cancel Orders When Stopped", DefaultValue = true)]
+        public bool CancelOrdersWhenStopped { get; set; }
+
+
+        // =====================================================
+        // INTERNAL
+        // =====================================================
 
         private double _volume;
 
+
+        // =====================================================
+        // START
+        // =====================================================
+
         protected override void OnStart()
         {
-            string symbol =
+            string cleanSymbol =
                 SymbolName
-                .ToUpperInvariant()
-                .Replace("/", "")
-                .Replace("-", "")
-                .Replace(".", "")
-                .Replace("_", "")
-                .Replace(" ", "");
+                    .ToUpperInvariant()
+                    .Replace("/", "")
+                    .Replace("-", "")
+                    .Replace(".", "")
+                    .Replace("_", "")
+                    .Replace(" ", "");
 
-            bool validSymbol =
-                symbol.Contains("USTEC") ||
-                symbol.Contains("US100") ||
-                symbol.Contains("NAS100") ||
-                symbol.Contains("NASDAQ");
+            bool gold =
+                cleanSymbol.Contains("XAUUSD") ||
+                cleanSymbol.Contains("GOLD") ||
+                cleanSymbol.Contains("XAU");
 
-            if (!validSymbol)
+            if (!gold)
             {
-                Print("Run this cBot on USTEC / US100 / NAS100.");
+                Print("ERROR: RUN THIS BOT ON XAUUSD / GOLD ONLY.");
                 Stop();
                 return;
             }
 
             _volume =
-                Symbol.QuantityToVolumeInUnits(
-                    LotSize
-                );
+                Symbol.QuantityToVolumeInUnits(LotSize);
 
             _volume =
                 Symbol.NormalizeVolumeInUnits(
@@ -77,40 +90,58 @@ namespace cAlgo.Robots
                     RoundingMode.Down
                 );
 
-            if (_volume < Symbol.VolumeInUnitsMin)
-                _volume = Symbol.VolumeInUnitsMin;
+            _volume =
+                Math.Max(
+                    _volume,
+                    Symbol.VolumeInUnitsMin
+                );
 
-            if (_volume > Symbol.VolumeInUnitsMax)
-                _volume = Symbol.VolumeInUnitsMax;
+            _volume =
+                Math.Min(
+                    _volume,
+                    Symbol.VolumeInUnitsMax
+                );
 
             Timer.Start(1);
 
             Print("==========================================");
-            Print("USTEC SPIDER GRID BOT");
+            Print("XAUUSD SPIDER GRID STARTED");
             Print("LOT SIZE: {0}", LotSize);
-            Print("GRID LEVELS: {0} BUY + {0} SELL", GridLevelsPerSide);
-            Print("GRID SPACING: {0}", GridSpacingPrice);
+            Print("BUY STOP LEVELS: {0}", GridLevelsPerSide);
+            Print("SELL STOP LEVELS: {0}", GridLevelsPerSide);
+            Print("GRID SPACING: ${0}", GridSpacingPrice);
+            Print("CHECKING EVERY: 1 SECOND");
             Print("CLOSE: ANY POSITIVE NET PROFIT");
-            Print("CHECK SPEED: EVERY 1 SECOND");
             Print("TRADING ENABLED: {0}", EnableTrading);
             Print("==========================================");
 
             if (EnableTrading)
+            {
+                CloseProfitablePositions();
                 MaintainGrid();
+            }
         }
+
+
+        // =====================================================
+        // EVERY SECOND
+        // =====================================================
 
         protected override void OnTimer()
         {
             if (!EnableTrading)
                 return;
 
+            // First close profitable triggered positions.
             CloseProfitablePositions();
 
+            // Then rebuild / maintain spider grid.
             MaintainGrid();
         }
 
+
         // =====================================================
-        // CLOSE EVERY POSITION AS SOON AS NET PROFIT > 0
+        // CLOSE TRIGGERED POSITION AT ANY PROFIT
         // =====================================================
 
         private void CloseProfitablePositions()
@@ -123,31 +154,20 @@ namespace cAlgo.Robots
 
             foreach (Position position in positions)
             {
-                bool profitable;
-
-                if (CloseAtAnyProfit)
-                {
-                    profitable =
-                        position.NetProfit >
-                        MinimumNetProfit;
-                }
-                else
-                {
-                    profitable = false;
-                }
-
-                if (!profitable)
+                if (
+                    position.NetProfit <=
+                    MinimumNetProfit
+                )
                     continue;
 
                 TradeResult result =
-                    ClosePosition(
-                        position
-                    );
+                    ClosePosition(position);
 
                 if (result.IsSuccessful)
                 {
                     Print(
-                        "PROFIT CLOSED | ID {0} | NET {1:F2} | PIPS {2:F2}",
+                        "PROFIT CLOSED | {0} | ID {1} | NET {2:F2} | PIPS {3:F2}",
+                        position.TradeType,
                         position.Id,
                         position.NetProfit,
                         position.Pips
@@ -164,8 +184,9 @@ namespace cAlgo.Robots
             }
         }
 
+
         // =====================================================
-        // KEEP SPIDER GRID ACTIVE
+        // MAINTAIN BUY STOP + SELL STOP SPIDER
         // =====================================================
 
         private void MaintainGrid()
@@ -178,7 +199,10 @@ namespace cAlgo.Robots
                 /
                 Symbol.PipSize;
 
-            if (spreadPips > MaximumSpreadPips)
+            if (
+                spreadPips >
+                MaximumSpreadPips
+            )
             {
                 Print(
                     "SPREAD TOO HIGH: {0:F2}",
@@ -188,72 +212,97 @@ namespace cAlgo.Robots
                 return;
             }
 
-            Position[] openPositions =
+
+            // =================================================
+            // OPEN POSITION LIMIT
+            // =================================================
+
+            int openPositions =
                 Positions.FindAll(
                     Label,
                     SymbolName
-                );
+                ).Length;
 
-            int openCount =
-                openPositions.Length;
-
-            int availableCapacity =
+            int remainingCapacity =
                 MaximumOpenPositions -
-                openCount;
+                openPositions;
 
-            if (availableCapacity <= 0)
+            if (remainingCapacity <= 0)
             {
                 CancelAllPendingOrders();
-
                 return;
             }
 
-            int maximumPending =
+
+            // =================================================
+            // HOW MANY PENDING ORDERS ARE ALLOWED
+            // =================================================
+
+            int desiredTotal =
                 Math.Min(
                     GridLevelsPerSide * 2,
-                    availableCapacity
+                    remainingCapacity
                 );
 
-            int desiredBuyCount =
+            int desiredBuys =
                 Math.Min(
                     GridLevelsPerSide,
-                    (maximumPending + 1) / 2
+                    (desiredTotal + 1) / 2
                 );
 
-            int desiredSellCount =
+            int desiredSells =
                 Math.Min(
                     GridLevelsPerSide,
-                    maximumPending / 2
+                    desiredTotal / 2
                 );
 
-            List<double> desiredBuys =
+
+            // =================================================
+            // BUILD PRICE LADDER
+            // =================================================
+
+            List<double> buyLevels =
                 BuildBuyLevels(
-                    desiredBuyCount
+                    desiredBuys
                 );
 
-            List<double> desiredSells =
+            List<double> sellLevels =
                 BuildSellLevels(
-                    desiredSellCount
+                    desiredSells
                 );
 
-            RemoveUnwantedPendingOrders(
-                desiredBuys,
-                desiredSells
-            );
+
+            // =================================================
+            // RECENTER ORDERS LIKE THE SPIDER PICTURE
+            // =================================================
+
+            if (RecenterGrid)
+            {
+                RemoveOrdersOutsideGrid(
+                    buyLevels,
+                    sellLevels
+                );
+            }
+
+
+            // =================================================
+            // REPLACE MISSING ORDERS
+            // =================================================
 
             AddMissingOrders(
                 TradeType.Buy,
-                desiredBuys
+                buyLevels
             );
 
             AddMissingOrders(
                 TradeType.Sell,
-                desiredSells
+                sellLevels
             );
         }
 
+
         // =====================================================
-        // BUY STOP LEVELS
+        // BUY STOPS ABOVE CURRENT PRICE
         // =====================================================
 
         private List<double> BuildBuyLevels(
@@ -266,42 +315,37 @@ namespace cAlgo.Robots
             if (count <= 0)
                 return levels;
 
-            double minimumPrice =
+            double first =
                 Symbol.Ask +
-                EntryBufferPrice;
+                FirstOrderDistance;
 
-            double firstLevel =
-                Math.Floor(
-                    minimumPrice /
-                    GridSpacingPrice
-                )
-                *
-                GridSpacingPrice;
+            first =
+                AlignUpToGrid(first);
 
-            if (firstLevel <= minimumPrice)
-                firstLevel += GridSpacingPrice;
-
-            for (int i = 0; i < count; i++)
+            for (
+                int i = 0;
+                i < count;
+                i++
+            )
             {
-                double price =
-                    firstLevel +
+                double target =
+                    first +
                     (
-                        i *
-                        GridSpacingPrice
+                        GridSpacingPrice *
+                        i
                     );
 
                 levels.Add(
-                    NormalizePrice(
-                        price
-                    )
+                    NormalizePrice(target)
                 );
             }
 
             return levels;
         }
 
+
         // =====================================================
-        // SELL STOP LEVELS
+        // SELL STOPS BELOW CURRENT PRICE
         // =====================================================
 
         private List<double> BuildSellLevels(
@@ -314,103 +358,48 @@ namespace cAlgo.Robots
             if (count <= 0)
                 return levels;
 
-            double maximumPrice =
+            double first =
                 Symbol.Bid -
-                EntryBufferPrice;
+                FirstOrderDistance;
 
-            double firstLevel =
-                Math.Ceiling(
-                    maximumPrice /
-                    GridSpacingPrice
-                )
-                *
-                GridSpacingPrice;
+            first =
+                AlignDownToGrid(first);
 
-            if (firstLevel >= maximumPrice)
-                firstLevel -= GridSpacingPrice;
-
-            for (int i = 0; i < count; i++)
+            for (
+                int i = 0;
+                i < count;
+                i++
+            )
             {
-                double price =
-                    firstLevel -
+                double target =
+                    first -
                     (
-                        i *
-                        GridSpacingPrice
+                        GridSpacingPrice *
+                        i
                     );
 
                 levels.Add(
-                    NormalizePrice(
-                        price
-                    )
+                    NormalizePrice(target)
                 );
             }
 
             return levels;
         }
 
-        // =====================================================
-        // REMOVE OLD GRID ORDERS
-        // =====================================================
-
-        private void RemoveUnwantedPendingOrders(
-            List<double> desiredBuys,
-            List<double> desiredSells
-        )
-        {
-            PendingOrder[] orders =
-                PendingOrders
-                .Where(
-                    order =>
-                        order.Label == Label &&
-                        order.SymbolName == SymbolName
-                )
-                .ToArray();
-
-            foreach (PendingOrder order in orders)
-            {
-                List<double> desired =
-                    order.TradeType == TradeType.Buy
-                    ? desiredBuys
-                    : desiredSells;
-
-                bool keep =
-                    desired.Any(
-                        price =>
-                            PricesMatch(
-                                price,
-                                order.TargetPrice
-                            )
-                    );
-
-                if (keep)
-                    continue;
-
-                TradeResult result =
-                    CancelPendingOrder(
-                        order
-                    );
-
-                if (result.IsSuccessful)
-                {
-                    Print(
-                        "REMOVED OLD {0} STOP @ {1}",
-                        order.TradeType,
-                        order.TargetPrice
-                    );
-                }
-            }
-        }
 
         // =====================================================
-        // ADD MISSING BUY/SELL STOPS
+        // ADD MISSING PENDING ORDERS
         // =====================================================
 
         private void AddMissingOrders(
             TradeType tradeType,
-            List<double> desiredLevels
+            List<double> levels
         )
         {
-            foreach (double targetPrice in desiredLevels)
+            foreach (
+                double targetPrice
+                in levels
+            )
             {
                 if (
                     PendingExists(
@@ -420,14 +409,49 @@ namespace cAlgo.Robots
                 )
                     continue;
 
-                if (
+
+                int openCount =
                     Positions.FindAll(
                         Label,
                         SymbolName
-                    ).Length >=
+                    ).Length;
+
+
+                int pendingCount =
+                    PendingOrders.Count(
+                        order =>
+                            order.Label == Label &&
+                            order.SymbolName == SymbolName
+                    );
+
+
+                if (
+                    openCount +
+                    pendingCount >=
                     MaximumOpenPositions
                 )
                     return;
+
+
+                // BUY STOP must remain above Ask.
+                if (
+                    tradeType ==
+                    TradeType.Buy &&
+                    targetPrice <=
+                    Symbol.Ask
+                )
+                    continue;
+
+
+                // SELL STOP must remain below Bid.
+                if (
+                    tradeType ==
+                    TradeType.Sell &&
+                    targetPrice >=
+                    Symbol.Bid
+                )
+                    continue;
+
 
                 TradeResult result =
                     PlaceStopOrder(
@@ -438,10 +462,11 @@ namespace cAlgo.Robots
                         Label
                     );
 
+
                 if (result.IsSuccessful)
                 {
                     Print(
-                        "{0} STOP PLACED | {1} | LOT {2}",
+                        "{0} STOP | {1} | LOT {2}",
                         tradeType,
                         targetPrice,
                         LotSize
@@ -459,13 +484,77 @@ namespace cAlgo.Robots
             }
         }
 
+
         // =====================================================
-        // CHECK FOR DUPLICATE ORDER
+        // REMOVE OLD ORDERS WHEN PRICE MOVES
+        // =====================================================
+
+        private void RemoveOrdersOutsideGrid(
+            List<double> desiredBuys,
+            List<double> desiredSells
+        )
+        {
+            PendingOrder[] orders =
+                PendingOrders
+                    .Where(
+                        order =>
+                            order.Label == Label &&
+                            order.SymbolName == SymbolName
+                    )
+                    .ToArray();
+
+
+            foreach (
+                PendingOrder order
+                in orders
+            )
+            {
+                List<double> desiredLevels =
+                    order.TradeType ==
+                    TradeType.Buy
+                        ? desiredBuys
+                        : desiredSells;
+
+
+                bool shouldRemain =
+                    desiredLevels.Any(
+                        target =>
+                            PricesMatch(
+                                target,
+                                order.TargetPrice
+                            )
+                    );
+
+
+                if (shouldRemain)
+                    continue;
+
+
+                TradeResult result =
+                    CancelPendingOrder(
+                        order
+                    );
+
+
+                if (result.IsSuccessful)
+                {
+                    Print(
+                        "GRID RECENTER | REMOVED {0} @ {1}",
+                        order.TradeType,
+                        order.TargetPrice
+                    );
+                }
+            }
+        }
+
+
+        // =====================================================
+        // DUPLICATE PROTECTION
         // =====================================================
 
         private bool PendingExists(
             TradeType tradeType,
-            double targetPrice
+            double target
         )
         {
             return PendingOrders.Any(
@@ -475,13 +564,14 @@ namespace cAlgo.Robots
                     order.TradeType == tradeType &&
                     PricesMatch(
                         order.TargetPrice,
-                        targetPrice
+                        target
                     )
             );
         }
 
+
         // =====================================================
-        // PRICE COMPARISON
+        // PRICE MATCHING
         // =====================================================
 
         private bool PricesMatch(
@@ -500,6 +590,71 @@ namespace cAlgo.Robots
                 tolerance;
         }
 
+
+        // =====================================================
+        // GRID ALIGNMENT
+        // =====================================================
+
+        private double AlignUpToGrid(
+            double price
+        )
+        {
+            double aligned =
+                Math.Ceiling(
+                    price /
+                    GridSpacingPrice
+                )
+                *
+                GridSpacingPrice;
+
+            if (
+                aligned <=
+                Symbol.Ask
+            )
+            {
+                aligned +=
+                    GridSpacingPrice;
+            }
+
+            return
+                NormalizePrice(
+                    aligned
+                );
+        }
+
+
+        private double AlignDownToGrid(
+            double price
+        )
+        {
+            double aligned =
+                Math.Floor(
+                    price /
+                    GridSpacingPrice
+                )
+                *
+                GridSpacingPrice;
+
+            if (
+                aligned >=
+                Symbol.Bid
+            )
+            {
+                aligned -=
+                    GridSpacingPrice;
+            }
+
+            return
+                NormalizePrice(
+                    aligned
+                );
+        }
+
+
+        // =====================================================
+        // NORMALIZE GOLD PRICE
+        // =====================================================
+
         private double NormalizePrice(
             double price
         )
@@ -510,28 +665,34 @@ namespace cAlgo.Robots
             );
         }
 
+
         // =====================================================
-        // CANCEL BOT'S PENDING ORDERS
+        // CANCEL ALL BOT PENDING ORDERS
         // =====================================================
 
         private void CancelAllPendingOrders()
         {
             PendingOrder[] orders =
                 PendingOrders
-                .Where(
-                    order =>
-                        order.Label == Label &&
-                        order.SymbolName == SymbolName
-                )
-                .ToArray();
+                    .Where(
+                        order =>
+                            order.Label == Label &&
+                            order.SymbolName == SymbolName
+                    )
+                    .ToArray();
 
-            foreach (PendingOrder order in orders)
+
+            foreach (
+                PendingOrder order
+                in orders
+            )
             {
                 CancelPendingOrder(
                     order
                 );
             }
         }
+
 
         // =====================================================
         // STOP
@@ -541,13 +702,15 @@ namespace cAlgo.Robots
         {
             Timer.Stop();
 
-            if (CancelPendingWhenStopped)
+            if (
+                CancelOrdersWhenStopped
+            )
             {
                 CancelAllPendingOrders();
             }
 
             Print(
-                "USTEC SPIDER GRID BOT STOPPED"
+                "XAUUSD SPIDER GRID STOPPED"
             );
         }
     }
