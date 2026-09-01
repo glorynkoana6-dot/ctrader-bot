@@ -41,7 +41,7 @@ namespace cAlgo.Robots
 
 
         // =====================================================
-        // TRAILING STOP SETTINGS
+        // TRAILING STOP
         // =====================================================
 
         [Parameter("Enable Trailing Stop", DefaultValue = true)]
@@ -67,7 +67,6 @@ namespace cAlgo.Robots
         private Bars _m15;
         private Bars _h1;
 
-        private DateTime _lastProcessedCandle = DateTime.MinValue;
         private DateTime _lastTradeCandle = DateTime.MinValue;
 
         private readonly Dictionary<long, double> _initialRisk =
@@ -89,84 +88,77 @@ namespace cAlgo.Robots
             if (!symbol.Contains("XAU") || !symbol.Contains("USD"))
             {
                 Print("ERROR: This bot is for XAUUSD / GOLD only.");
-
                 Stop();
-
                 return;
             }
 
-            _m5 =
-                MarketData.GetBars(
-                    TimeFrame.Minute5,
-                    SymbolName
-                );
+            _m5 = MarketData.GetBars(
+                TimeFrame.Minute5,
+                SymbolName
+            );
 
-            _m15 =
-                MarketData.GetBars(
-                    TimeFrame.Minute15,
-                    SymbolName
-                );
+            _m15 = MarketData.GetBars(
+                TimeFrame.Minute15,
+                SymbolName
+            );
 
-            _h1 =
-                MarketData.GetBars(
-                    TimeFrame.Hour,
-                    SymbolName
-                );
+            _h1 = MarketData.GetBars(
+                TimeFrame.Hour,
+                SymbolName
+            );
 
             Positions.Closed += OnPositionClosed;
 
             RestoreInitialRisk();
 
-            Timer.Start(5);
+            // Analyse every second
+            Timer.Start(1);
+
+            Chart.DrawStaticText(
+                "BOT_STATUS",
+                "🤖 XAUUSD ROBOT RUNNING\nANALYSING EVERY SECOND",
+                VerticalAlignment.Bottom,
+                HorizontalAlignment.Left,
+                Color.White
+            );
 
             Print("==================================================");
             Print("XAUUSD MULTI TIMEFRAME ROBOT");
-            Print("5M ENTRY");
-            Print("15M CONFIRMATION");
-            Print("1H MAIN TREND");
+            Print("M5 ENTRY");
+            Print("M15 CONFIRMATION");
+            Print("H1 TREND");
+            Print("ANALYSIS EVERY 1 SECOND");
+            Print("TRAILING STOP EVERY PRICE TICK");
             Print("RISK / REWARD = 1:{0}", RiskReward);
-
-            Print(
-                "REAL TRADING = {0}",
-                EnableRealTrading ? "ON" : "OFF"
-            );
-
-            Print(
-                "TRAILING STOP = {0}",
-                EnableTrailingStop ? "ON" : "OFF"
-            );
-
-            Print(
-                "BREAKEVEN AT +{0:F1}R",
-                BreakevenTriggerR
-            );
-
-            Print(
-                "TRAIL = {0:F1} ATR",
-                TrailingAtrMultiplier
-            );
-
             Print("==================================================");
 
             if (AnalyseImmediately)
-                AnalyseMarket(true);
+                AnalyseMarket();
         }
 
 
         // =====================================================
-        // TIMER
+        // ANALYSE EVERY SECOND
         // =====================================================
 
         protected override void OnTimer()
         {
-            ManageTrailingStops();
-
-            AnalyseMarket(false);
+            AnalyseMarket();
         }
 
 
         // =====================================================
-        // RESTORE EXISTING POSITION RISK
+        // TRAILING STOP EVERY PRICE TICK
+        // =====================================================
+
+        protected override void OnTick()
+        {
+            ManageTrailingStops();
+        }
+
+
+        // =====================================================
+        // RESTORE INITIAL RISK
         // =====================================================
 
         private void RestoreInitialRisk()
@@ -205,8 +197,7 @@ namespace cAlgo.Robots
             PositionClosedEventArgs args
         )
         {
-            Position position =
-                args.Position;
+            Position position = args.Position;
 
             if (
                 position.Label != Label ||
@@ -220,7 +211,7 @@ namespace cAlgo.Robots
 
 
         // =====================================================
-        // TRAILING STOP
+        // LIVE TRAILING STOP
         // =====================================================
 
         private void ManageTrailingStops()
@@ -277,9 +268,9 @@ namespace cAlgo.Robots
                     continue;
 
 
-                // =============================================
-                // BUY
-                // =============================================
+                // =================================================
+                // BUY TRAILING
+                // =================================================
 
                 if (position.TradeType == TradeType.Buy)
                 {
@@ -298,8 +289,6 @@ namespace cAlgo.Robots
                         continue;
 
 
-                    // Breakeven + small profit
-
                     double breakeven =
                         position.EntryPrice +
                         (
@@ -307,8 +296,6 @@ namespace cAlgo.Robots
                             Symbol.PipSize
                         );
 
-
-                    // ATR trailing level
 
                     double trailingStop =
                         currentPrice -
@@ -318,16 +305,12 @@ namespace cAlgo.Robots
                         );
 
 
-                    // Never put trailing stop below breakeven
-
                     double newStop =
                         Math.Max(
                             breakeven,
                             trailingStop
                         );
 
-
-                    // Stop must remain below live Bid
 
                     if (newStop >= currentPrice)
                         continue;
@@ -354,28 +337,19 @@ namespace cAlgo.Robots
                     if (result.IsSuccessful)
                     {
                         Print(
-                            "🔒 BUY SL MOVED | New SL: {0}",
+                            "🔒 BUY TRAIL | PRICE {0:F2} | SL {1:F2}",
+                            currentPrice,
                             newStop
-                        );
-                    }
-                    else
-                    {
-                        Print(
-                            "BUY trailing SL error: {0}",
-                            result.Error
                         );
                     }
                 }
 
 
-                // =============================================
-                // SELL
-                // =============================================
+                // =================================================
+                // SELL TRAILING
+                // =================================================
 
-                else if (
-                    position.TradeType ==
-                    TradeType.Sell
-                )
+                else if (position.TradeType == TradeType.Sell)
                 {
                     double currentPrice =
                         Symbol.Ask;
@@ -392,8 +366,6 @@ namespace cAlgo.Robots
                         continue;
 
 
-                    // Breakeven + small profit
-
                     double breakeven =
                         position.EntryPrice -
                         (
@@ -402,7 +374,8 @@ namespace cAlgo.Robots
                         );
 
 
-                    // ATR trailing stop
+                    // As price goes DOWN,
+                    // trailing stop follows DOWN.
 
                     double trailingStop =
                         currentPrice +
@@ -411,8 +384,6 @@ namespace cAlgo.Robots
                             TrailingAtrMultiplier
                         );
 
-
-                    // Never move above breakeven
 
                     double newStop =
                         Math.Min(
@@ -425,6 +396,7 @@ namespace cAlgo.Robots
                         continue;
 
 
+                    // ONLY MOVE SELL SL DOWN
                     bool shouldMove =
                         !position.StopLoss.HasValue ||
                         newStop <
@@ -446,15 +418,9 @@ namespace cAlgo.Robots
                     if (result.IsSuccessful)
                     {
                         Print(
-                            "🔒 SELL SL MOVED | New SL: {0}",
+                            "🔒 SELL TRAIL | PRICE {0:F2} | SL {1:F2}",
+                            currentPrice,
                             newStop
-                        );
-                    }
-                    else
-                    {
-                        Print(
-                            "SELL trailing SL error: {0}",
-                            result.Error
                         );
                     }
                 }
@@ -463,11 +429,19 @@ namespace cAlgo.Robots
 
 
         // =====================================================
-        // MAIN MARKET ANALYSIS
+        // ANALYSE MARKET
         // =====================================================
 
-        private void AnalyseMarket(bool force)
+        private void AnalyseMarket()
         {
+            if (
+                _m5 == null ||
+                _m15 == null ||
+                _h1 == null
+            )
+                return;
+
+
             int m5Index =
                 _m5.Count - 2;
 
@@ -494,18 +468,6 @@ namespace cAlgo.Robots
 
             DateTime candleTime =
                 _m5.OpenTimes[m5Index];
-
-
-            if (
-                !force &&
-                candleTime ==
-                _lastProcessedCandle
-            )
-                return;
-
-
-            _lastProcessedCandle =
-                candleTime;
 
 
             TfAnalysis entry =
@@ -544,6 +506,13 @@ namespace cAlgo.Robots
                 );
 
 
+            // Draw bull / bear on chart
+            DrawSignalOnChart(
+                signal,
+                entry
+            );
+
+
             PrintReport(
                 entry,
                 confirmation,
@@ -553,10 +522,7 @@ namespace cAlgo.Robots
             );
 
 
-            if (
-                signal.Signal ==
-                "WAIT"
-            )
+            if (signal.Signal == "WAIT")
                 return;
 
 
@@ -570,10 +536,7 @@ namespace cAlgo.Robots
             }
 
 
-            if (
-                _lastTradeCandle ==
-                candleTime
-            )
+            if (_lastTradeCandle == candleTime)
                 return;
 
 
@@ -602,10 +565,7 @@ namespace cAlgo.Robots
                 Symbol.PipSize;
 
 
-            if (
-                spread >
-                MaximumSpreadPips
-            )
+            if (spread > MaximumSpreadPips)
             {
                 Print(
                     "Spread too high: {0:F1} pips",
@@ -621,6 +581,116 @@ namespace cAlgo.Robots
                 levels,
                 candleTime
             );
+        }
+
+
+        // =====================================================
+        // 🐂 BULL / 🐻 BEAR CHART DISPLAY
+        // =====================================================
+
+        private void DrawSignalOnChart(
+            SignalData signal,
+            TfAnalysis entry
+        )
+        {
+            // Remove previous live arrow/text
+            Chart.RemoveObject("LIVE_SIGNAL_ARROW");
+            Chart.RemoveObject("LIVE_SIGNAL_PRICE");
+
+
+            // =================================================
+            // BUY = BULL
+            // =================================================
+
+            if (signal.Signal == "BUY")
+            {
+                Chart.DrawStaticText(
+                    "LIVE_SIGNAL",
+                    "🐂\n🐂 BULL BUY SIGNAL 🐂\n" +
+                    "BUY SCORE: " + signal.BuyScore +
+                    "\nCONFIDENCE: " + signal.Confidence + "%" +
+                    "\nPRICE: " + Symbol.Ask.ToString("F2"),
+                    VerticalAlignment.Top,
+                    HorizontalAlignment.Right,
+                    Color.Lime
+                );
+
+
+                Chart.DrawIcon(
+                    "LIVE_SIGNAL_ARROW",
+                    ChartIconType.UpArrow,
+                    Server.Time,
+                    Symbol.Bid,
+                    Color.Lime
+                );
+
+
+                Chart.DrawText(
+                    "LIVE_SIGNAL_PRICE",
+                    "🐂 BUY",
+                    Server.Time,
+                    Symbol.Bid -
+                    entry.Atr * 0.25,
+                    Color.Lime
+                );
+            }
+
+
+            // =================================================
+            // SELL = BEAR
+            // =================================================
+
+            else if (signal.Signal == "SELL")
+            {
+                Chart.DrawStaticText(
+                    "LIVE_SIGNAL",
+                    "🐻\n🐻 BEAR SELL SIGNAL 🐻\n" +
+                    "SELL SCORE: " + signal.SellScore +
+                    "\nCONFIDENCE: " + signal.Confidence + "%" +
+                    "\nPRICE: " + Symbol.Bid.ToString("F2"),
+                    VerticalAlignment.Top,
+                    HorizontalAlignment.Right,
+                    Color.Red
+                );
+
+
+                Chart.DrawIcon(
+                    "LIVE_SIGNAL_ARROW",
+                    ChartIconType.DownArrow,
+                    Server.Time,
+                    Symbol.Ask,
+                    Color.Red
+                );
+
+
+                Chart.DrawText(
+                    "LIVE_SIGNAL_PRICE",
+                    "🐻 SELL",
+                    Server.Time,
+                    Symbol.Ask +
+                    entry.Atr * 0.25,
+                    Color.Red
+                );
+            }
+
+
+            // =================================================
+            // WAIT
+            // =================================================
+
+            else
+            {
+                Chart.DrawStaticText(
+                    "LIVE_SIGNAL",
+                    "⏳ WAIT\n" +
+                    "BUY: " + signal.BuyScore +
+                    "\nSELL: " + signal.SellScore +
+                    "\nREQUIRED: " + signal.RequiredScore,
+                    VerticalAlignment.Top,
+                    HorizontalAlignment.Right,
+                    Color.Yellow
+                );
+            }
         }
 
 
@@ -756,100 +826,59 @@ namespace cAlgo.Robots
                 );
 
 
-            int bull =
-                0;
+            int bull = 0;
+            int bear = 0;
 
-            int bear =
-                0;
-
-
-            // EMA 9 / EMA 20
 
             if (ema9 > ema20)
                 bull += 1;
-
             else
                 bear += 1;
 
 
-            // EMA 20 / EMA 50
-
             if (ema20 > ema50)
                 bull += 2;
-
             else
                 bear += 2;
 
 
-            // EMA 50 / EMA 200
-
             if (ema50 > ema200)
                 bull += 3;
-
             else
                 bear += 3;
 
 
-            // Price vs EMA 200
-
             if (current > ema200)
                 bull += 2;
-
             else
                 bear += 2;
 
 
-            // Structure
-
-            if (
-                structure.Trend ==
-                "BULLISH"
-            )
+            if (structure.Trend == "BULLISH")
                 bull += 2;
 
-
-            else if (
-                structure.Trend ==
-                "BEARISH"
-            )
+            else if (structure.Trend == "BEARISH")
                 bear += 2;
 
 
-            // MACD
-
-            if (
-                macdHistogram > 0
-            )
+            if (macdHistogram > 0)
                 bull += 2;
 
-            else if (
-                macdHistogram < 0
-            )
+            else if (macdHistogram < 0)
                 bear += 2;
 
 
-            // Momentum
-
-            if (
-                momentum > 0
-            )
+            if (momentum > 0)
                 bull += 1;
 
-            else if (
-                momentum < 0
-            )
+            else if (momentum < 0)
                 bear += 1;
 
 
-            // VWAP
-
             if (vwap > 0)
             {
-                if (
-                    current > vwap
-                )
+                if (current > vwap)
                     bull += 1;
-
                 else
                     bear += 1;
             }
@@ -858,51 +887,27 @@ namespace cAlgo.Robots
             string direction;
 
 
-            if (
-                bull >=
-                bear + 3
-            )
-                direction =
-                    "BULLISH";
+            if (bull >= bear + 3)
+                direction = "BULLISH";
 
-
-            else if (
-                bear >=
-                bull + 3
-            )
-                direction =
-                    "BEARISH";
-
+            else if (bear >= bull + 3)
+                direction = "BEARISH";
 
             else
-                direction =
-                    "NEUTRAL";
+                direction = "NEUTRAL";
 
 
             string regime;
 
 
-            if (
-                volatility < 0.03
-            )
-                regime =
-                    "RANGING";
+            if (volatility < 0.03)
+                regime = "RANGING";
 
+            else if (volatility > 0.30)
+                regime = "HIGH VOLATILITY";
 
-            else if (
-                volatility > 0.30
-            )
-                regime =
-                    "HIGH VOLATILITY";
-
-
-            else if (
-                breakout !=
-                "NONE"
-            )
-                regime =
-                    "BREAKOUT";
-
+            else if (breakout != "NONE")
+                regime = "BREAKOUT";
 
             else
                 regime =
@@ -912,29 +917,19 @@ namespace cAlgo.Robots
 
             return new TfAnalysis
             {
-                Price =
-                    current,
+                Price = current,
 
-                Ema9 =
-                    ema9,
+                Ema9 = ema9,
+                Ema20 = ema20,
+                Ema50 = ema50,
+                Ema200 = ema200,
 
-                Ema20 =
-                    ema20,
-
-                Ema50 =
-                    ema50,
-
-                Ema200 =
-                    ema200,
-
-                Rsi =
-                    rsi,
+                Rsi = rsi,
 
                 MacdHistogram =
                     macdHistogram,
 
-                Atr =
-                    atr,
+                Atr = atr,
 
                 Momentum =
                     momentum,
@@ -942,8 +937,7 @@ namespace cAlgo.Robots
                 Volatility =
                     volatility,
 
-                Vwap =
-                    vwap,
+                Vwap = vwap,
 
                 RelativeVolume =
                     relativeVolume,
@@ -985,62 +979,38 @@ namespace cAlgo.Robots
             TfAnalysis trend
         )
         {
-            int buy =
-                0;
-
-            int sell =
-                0;
+            int buy = 0;
+            int sell = 0;
 
 
-            // 1H trend
+            // H1 TREND
 
-            if (
-                trend.Trend ==
-                "BULLISH"
-            )
+            if (trend.Trend == "BULLISH")
                 buy += 20;
 
-
-            else if (
-                trend.Trend ==
-                "BEARISH"
-            )
+            else if (trend.Trend == "BEARISH")
                 sell += 20;
 
 
-            // 15M confirmation
+            // M15
 
-            if (
-                confirm.Trend ==
-                "BULLISH"
-            )
+            if (confirm.Trend == "BULLISH")
                 buy += 15;
 
-
-            else if (
-                confirm.Trend ==
-                "BEARISH"
-            )
+            else if (confirm.Trend == "BEARISH")
                 sell += 15;
 
 
-            // 5M entry trend
+            // M5
 
-            if (
-                entry.Trend ==
-                "BULLISH"
-            )
+            if (entry.Trend == "BULLISH")
                 buy += 15;
 
-
-            else if (
-                entry.Trend ==
-                "BEARISH"
-            )
+            else if (entry.Trend == "BEARISH")
                 sell += 15;
 
 
-            // Full bullish alignment
+            // FULL ALIGNMENT
 
             if (
                 trend.Trend == "BULLISH" &&
@@ -1050,8 +1020,6 @@ namespace cAlgo.Robots
                 buy += 10;
 
 
-            // Full bearish alignment
-
             if (
                 trend.Trend == "BEARISH" &&
                 confirm.Trend == "BEARISH" &&
@@ -1060,14 +1028,13 @@ namespace cAlgo.Robots
                 sell += 10;
 
 
-            // Market structure
+            // STRUCTURE
 
             if (
                 entry.Structure.Trend ==
                 "BULLISH"
             )
                 buy += 10;
-
 
             else if (
                 entry.Structure.Trend ==
@@ -1076,14 +1043,13 @@ namespace cAlgo.Robots
                 sell += 10;
 
 
-            // Break of structure
+            // BOS
 
             if (
                 entry.Structure.Bos ==
                 "BULLISH BOS"
             )
                 buy += 8;
-
 
             else if (
                 entry.Structure.Bos ==
@@ -1092,14 +1058,13 @@ namespace cAlgo.Robots
                 sell += 8;
 
 
-            // Breakout
+            // BREAKOUT
 
             if (
                 entry.Breakout ==
                 "BULLISH BREAKOUT"
             )
                 buy += 12;
-
 
             else if (
                 entry.Breakout ==
@@ -1108,14 +1073,13 @@ namespace cAlgo.Robots
                 sell += 12;
 
 
-            // False breakout penalty
+            // FALSE BREAKOUT
 
             if (
                 entry.FalseBreakout ==
                 "BULLISH TRAP"
             )
                 buy -= 15;
-
 
             else if (
                 entry.FalseBreakout ==
@@ -1132,23 +1096,16 @@ namespace cAlgo.Robots
             )
                 buy += 8;
 
-
             else if (
                 entry.Rsi >= 30 &&
                 entry.Rsi <= 48
             )
                 sell += 8;
 
-
-            else if (
-                entry.Rsi > 75
-            )
+            else if (entry.Rsi > 75)
                 sell += 4;
 
-
-            else if (
-                entry.Rsi < 25
-            )
+            else if (entry.Rsi < 25)
                 buy += 4;
 
 
@@ -1159,7 +1116,6 @@ namespace cAlgo.Robots
             )
                 buy += 8;
 
-
             else if (
                 entry.MacdHistogram < 0
             )
@@ -1168,9 +1124,7 @@ namespace cAlgo.Robots
 
             // VWAP
 
-            if (
-                entry.Vwap > 0
-            )
+            if (entry.Vwap > 0)
             {
                 if (
                     entry.Price >
@@ -1178,19 +1132,17 @@ namespace cAlgo.Robots
                 )
                     buy += 5;
 
-
                 else
                     sell += 5;
             }
 
 
-            // Momentum
+            // MOMENTUM
 
             if (
                 entry.Momentum > 0
             )
                 buy += 5;
-
 
             else if (
                 entry.Momentum < 0
@@ -1198,7 +1150,7 @@ namespace cAlgo.Robots
                 sell += 5;
 
 
-            // Candlestick pattern
+            // CANDLE
 
             if (
                 entry.CandlePattern ==
@@ -1218,7 +1170,7 @@ namespace cAlgo.Robots
                 sell += 5;
 
 
-            // Volume confirmation
+            // VOLUME
 
             if (
                 entry.RelativeVolume >=
@@ -1278,16 +1230,9 @@ namespace cAlgo.Robots
                     "SELL";
 
 
-            // ATR must exist
+            if (entry.Atr <= 0)
+                signal = "WAIT";
 
-            if (
-                entry.Atr <= 0
-            )
-                signal =
-                    "WAIT";
-
-
-            // Block false breakout
 
             if (
                 entry.FalseBreakout !=
@@ -1332,10 +1277,7 @@ namespace cAlgo.Robots
             TfAnalysis entry
         )
         {
-            if (
-                signal.Signal ==
-                "WAIT"
-            )
+            if (signal.Signal == "WAIT")
                 return new TradeLevels();
 
 
@@ -1344,9 +1286,7 @@ namespace cAlgo.Robots
                 SlAtrMultiplier;
 
 
-            if (
-                risk <= 0
-            )
+            if (risk <= 0)
                 return new TradeLevels();
 
 
@@ -1355,16 +1295,12 @@ namespace cAlgo.Robots
 
 
             double stopLoss;
-
             double takeProfit;
 
 
             // BUY
 
-            if (
-                signal.Signal ==
-                "BUY"
-            )
+            if (signal.Signal == "BUY")
             {
                 stopLoss =
                     entryPrice -
@@ -1478,7 +1414,7 @@ namespace cAlgo.Robots
 
 
         // =====================================================
-        // EXECUTE SIGNAL
+        // EXECUTE TRADE
         // =====================================================
 
         private void ExecuteSignal(
@@ -1495,8 +1431,7 @@ namespace cAlgo.Robots
 
 
             TradeType type =
-                signal.Signal ==
-                "BUY"
+                signal.Signal == "BUY"
                 ?
                 TradeType.Buy
                 :
@@ -1504,8 +1439,7 @@ namespace cAlgo.Robots
 
 
             double liveEntry =
-                type ==
-                TradeType.Buy
+                type == TradeType.Buy
                 ?
                 Symbol.Ask
                 :
@@ -1519,9 +1453,7 @@ namespace cAlgo.Robots
                 );
 
 
-            if (
-                slDistance <= 0
-            )
+            if (slDistance <= 0)
                 return;
 
 
@@ -1542,8 +1474,7 @@ namespace cAlgo.Robots
 
 
             double volume =
-                Symbol
-                .NormalizeVolumeInUnits(
+                Symbol.NormalizeVolumeInUnits(
                     VolumeInUnits,
                     RoundingMode.Down
                 );
@@ -1574,9 +1505,7 @@ namespace cAlgo.Robots
                 );
 
 
-            if (
-                result.IsSuccessful
-            )
+            if (result.IsSuccessful)
             {
                 _lastTradeCandle =
                     candleTime;
@@ -1592,51 +1521,13 @@ namespace cAlgo.Robots
 
 
                 Print("");
-
-                Print(
-                    "🔥 TRADE EXECUTED"
-                );
-
-
-                Print(
-                    "TYPE: {0}",
-                    signal.Signal
-                );
-
-
-                Print(
-                    "ENTRY: {0}",
-                    position.EntryPrice
-                );
-
-
-                Print(
-                    "SL: {0:F1} pips",
-                    stopPips
-                );
-
-
-                Print(
-                    "TP: {0:F1} pips",
-                    takePips
-                );
-
-
-                Print(
-                    "BREAKEVEN STARTS AT: +{0:F1}R",
-                    BreakevenTriggerR
-                );
-
-
-                Print(
-                    "TRAILING DISTANCE: {0:F1} ATR",
-                    TrailingAtrMultiplier
-                );
-
-
+                Print("🔥 TRADE EXECUTED");
+                Print("TYPE: {0}", signal.Signal);
+                Print("ENTRY: {0}", position.EntryPrice);
+                Print("SL: {0:F1} PIPS", stopPips);
+                Print("TP: {0:F1} PIPS", takePips);
                 Print("");
             }
-
 
             else
             {
@@ -1667,7 +1558,12 @@ namespace cAlgo.Robots
             );
 
             Print(
-                "🤖 XAUUSD MARKET ANALYSIS"
+                "🤖 XAUUSD LIVE ANALYSIS"
+            );
+
+            Print(
+                "TIME: {0:HH:mm:ss}",
+                Server.Time
             );
 
             Print(
@@ -1676,25 +1572,27 @@ namespace cAlgo.Robots
 
 
             Print(
-                "PRICE: {0}",
-                entry.Price
+                "LIVE BID: {0}",
+                Symbol.Bid
+            );
+
+            Print(
+                "LIVE ASK: {0}",
+                Symbol.Ask
             );
 
 
             Print("");
-
 
             Print(
                 "5M TREND: {0}",
                 entry.Trend
             );
 
-
             Print(
                 "15M TREND: {0}",
                 confirm.Trend
             );
-
 
             Print(
                 "1H TREND: {0}",
@@ -1704,63 +1602,48 @@ namespace cAlgo.Robots
 
             Print("");
 
-
-            Print(
-                "REGIME: {0}",
-                entry.Regime
-            );
-
-
             Print(
                 "RSI: {0:F2}",
                 entry.Rsi
             );
 
-
             Print(
-                "MACD HIST: {0:F4}",
+                "MACD: {0:F4}",
                 entry.MacdHistogram
             );
-
 
             Print(
                 "ATR: {0:F2}",
                 entry.Atr
             );
 
-
             Print(
                 "MOMENTUM: {0:F3}%",
                 entry.Momentum
             );
-
 
             Print(
                 "VWAP: {0:F2}",
                 entry.Vwap
             );
 
-
             Print(
-                "RELATIVE VOLUME: {0:F2}x",
+                "VOLUME: {0:F2}x",
                 entry.RelativeVolume
             );
 
 
             Print("");
 
-
             Print(
                 "STRUCTURE: {0}",
                 entry.Structure.Trend
             );
 
-
             Print(
                 "BOS: {0}",
                 entry.Structure.Bos
             );
-
 
             Print(
                 "BREAKOUT: {0}",
@@ -1768,38 +1651,22 @@ namespace cAlgo.Robots
             );
 
 
-            Print(
-                "FALSE BREAKOUT: {0}",
-                entry.FalseBreakout
-            );
-
-
-            Print(
-                "CANDLE: {0}",
-                entry.CandlePattern
-            );
-
-
             Print("");
-
 
             Print(
                 "BUY SCORE: {0}",
                 signal.BuyScore
             );
 
-
             Print(
                 "SELL SCORE: {0}",
                 signal.SellScore
             );
 
-
             Print(
-                "REQUIRED SCORE: {0}",
+                "REQUIRED: {0}",
                 signal.RequiredScore
             );
-
 
             Print(
                 "CONFIDENCE: {0}%",
@@ -1809,66 +1676,43 @@ namespace cAlgo.Robots
 
             Print("");
 
-
             Print(
                 "🎯 SIGNAL: {0}",
                 signal.Signal
             );
 
 
-            if (
-                levels.Entry.HasValue
-            )
+            if (levels.Entry.HasValue)
             {
                 Print(
                     "ENTRY: {0:F2}",
                     levels.Entry.Value
                 );
 
-
                 Print(
                     "SL: {0:F2}",
                     levels.StopLoss.Value
                 );
 
-
                 Print(
-                    "TP1 (+1R): {0:F2}",
+                    "TP1: {0:F2}",
                     levels.Tp1.Value
                 );
 
-
                 Print(
-                    "TP2 (+2R): {0:F2}",
+                    "TP2: {0:F2}",
                     levels.Tp2.Value
                 );
 
-
                 Print(
-                    "FINAL TP (+{0}R): {1:F2}",
-                    RiskReward,
+                    "FINAL TP: {0:F2}",
                     levels.TakeProfit.Value
                 );
-
-
-                Print(
-                    "TRAIL START: +{0:F1}R",
-                    BreakevenTriggerR
-                );
-
-
-                Print(
-                    "TRAIL DISTANCE: {0:F1} ATR",
-                    TrailingAtrMultiplier
-                );
             }
-
 
             Print(
                 "=================================================="
             );
-
-            Print("");
         }
 
 
@@ -1881,10 +1725,7 @@ namespace cAlgo.Robots
             int period
         )
         {
-            if (
-                values.Length <
-                period
-            )
+            if (values.Length < period)
                 return values[
                     values.Length - 1
                 ];
@@ -1942,11 +1783,8 @@ namespace cAlgo.Robots
                 return 50;
 
 
-            double gain =
-                0;
-
-            double loss =
-                0;
+            double gain = 0;
+            double loss = 0;
 
 
             for (
@@ -1960,29 +1798,20 @@ namespace cAlgo.Robots
                     closes[i - 1];
 
 
-                if (
-                    change > 0
-                )
-                    gain +=
-                        change;
-
+                if (change > 0)
+                    gain += change;
 
                 else
-                    loss +=
-                        -change;
+                    loss += -change;
             }
 
 
-            gain /=
-                period;
-
-            loss /=
-                period;
+            gain /= period;
+            loss /= period;
 
 
             for (
-                int i =
-                    period + 1;
+                int i = period + 1;
                 i < closes.Length;
                 i++
             )
@@ -2035,9 +1864,7 @@ namespace cAlgo.Robots
             }
 
 
-            if (
-                loss == 0
-            )
+            if (loss == 0)
                 return 100;
 
 
@@ -2046,7 +1873,8 @@ namespace cAlgo.Robots
                 loss;
 
 
-            return 100 -
+            return
+                100 -
                 (
                     100 /
                     (
@@ -2065,10 +1893,7 @@ namespace cAlgo.Robots
             double[] closes
         )
         {
-            if (
-                closes.Length <
-                40
-            )
+            if (closes.Length < 40)
                 return 0;
 
 
@@ -2104,10 +1929,7 @@ namespace cAlgo.Robots
             }
 
 
-            if (
-                macd.Count <
-                9
-            )
+            if (macd.Count < 9)
                 return 0;
 
 
@@ -2197,10 +2019,7 @@ namespace cAlgo.Robots
             }
 
 
-            if (
-                tr.Count <
-                period
-            )
+            if (tr.Count < period)
                 return 0;
 
 
@@ -2266,9 +2085,7 @@ namespace cAlgo.Robots
                 ];
 
 
-            if (
-                old == 0
-            )
+            if (old == 0)
                 return 0;
 
 
@@ -2320,9 +2137,7 @@ namespace cAlgo.Robots
                     ];
 
 
-                if (
-                    previous == 0
-                )
+                if (previous == 0)
                     continue;
 
 
@@ -2341,9 +2156,7 @@ namespace cAlgo.Robots
             }
 
 
-            if (
-                returns.Count < 2
-            )
+            if (returns.Count < 2)
                 return 0;
 
 
@@ -2390,11 +2203,8 @@ namespace cAlgo.Robots
                 );
 
 
-            double total =
-                0;
-
-            double volumeTotal =
-                0;
+            double total = 0;
+            double volumeTotal = 0;
 
 
             for (
@@ -2427,9 +2237,7 @@ namespace cAlgo.Robots
             }
 
 
-            if (
-                volumeTotal <= 0
-            )
+            if (volumeTotal <= 0)
                 return 0;
 
 
@@ -2456,8 +2264,7 @@ namespace cAlgo.Robots
                 return 1;
 
 
-            double average =
-                0;
+            double average = 0;
 
 
             for (
@@ -2472,13 +2279,10 @@ namespace cAlgo.Robots
             }
 
 
-            average /=
-                period;
+            average /= period;
 
 
-            if (
-                average <= 0
-            )
+            if (average <= 0)
                 return 1;
 
 
@@ -2489,7 +2293,7 @@ namespace cAlgo.Robots
 
 
         // =====================================================
-        // MARKET STRUCTURE
+        // STRUCTURE
         // =====================================================
 
         private StructureResult AnalyseStructure(
@@ -2546,19 +2350,15 @@ namespace cAlgo.Robots
 
 
                 if (swingHigh)
-                {
                     highs.Add(
                         bars.HighPrices[i]
                     );
-                }
 
 
                 if (swingLow)
-                {
                     lows.Add(
                         bars.LowPrices[i]
                     );
-                }
             }
 
 
@@ -2693,10 +2493,7 @@ namespace cAlgo.Robots
             int lookback
         )
         {
-            if (
-                index <
-                lookback
-            )
+            if (index < lookback)
                 return "NONE";
 
 
@@ -2733,18 +2530,12 @@ namespace cAlgo.Robots
                 bars.ClosePrices[index];
 
 
-            if (
-                close >
-                highest
-            )
+            if (close > highest)
                 return
                     "BULLISH BREAKOUT";
 
 
-            if (
-                close <
-                lowest
-            )
+            if (close < lowest)
                 return
                     "BEARISH BREAKOUT";
 
@@ -2844,9 +2635,7 @@ namespace cAlgo.Robots
             int index
         )
         {
-            if (
-                index < 1
-            )
+            if (index < 1)
                 return "NONE";
 
 
@@ -2874,8 +2663,6 @@ namespace cAlgo.Robots
                 ];
 
 
-            // Bullish engulfing
-
             if (
                 previousClose <
                 previousOpen
@@ -2892,8 +2679,6 @@ namespace cAlgo.Robots
                 return
                     "BULLISH ENGULFING";
 
-
-            // Bearish engulfing
 
             if (
                 previousClose >
@@ -3010,6 +2795,22 @@ namespace cAlgo.Robots
 
             Timer.Stop();
 
+            Chart.RemoveObject(
+                "LIVE_SIGNAL"
+            );
+
+            Chart.RemoveObject(
+                "LIVE_SIGNAL_ARROW"
+            );
+
+            Chart.RemoveObject(
+                "LIVE_SIGNAL_PRICE"
+            );
+
+            Chart.RemoveObject(
+                "BOT_STATUS"
+            );
+
             Print(
                 "XAUUSD bot stopped."
             );
@@ -3025,11 +2826,8 @@ namespace cAlgo.Robots
             public double Price;
 
             public double Ema9;
-
             public double Ema20;
-
             public double Ema50;
-
             public double Ema200;
 
             public double Rsi;
