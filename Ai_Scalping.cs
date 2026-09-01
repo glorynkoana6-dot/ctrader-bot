@@ -1,465 +1,1153 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using cAlgo.API;
-using cAlgo.API.Indicators;
 
 namespace cAlgo.Robots
 {
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-    public class GoldAITradingBot : Robot
+    public class US100MultiTradeBot : Robot
     {
+        // =====================================================
+        // SETTINGS
+        // =====================================================
+
         [Parameter("Enable Real Trading", DefaultValue = false)]
         public bool EnableRealTrading { get; set; }
 
         [Parameter("Volume In Units", DefaultValue = 1000, MinValue = 1)]
         public double VolumeInUnits { get; set; }
 
-        [Parameter("Minimum Signal Score", DefaultValue = 70, MinValue = 50, MaxValue = 100)]
+        [Parameter("Maximum Open Trades", DefaultValue = 10, MinValue = 1)]
+        public int MaximumOpenTrades { get; set; }
+
+        [Parameter("Minimum Entry Spacing Seconds", DefaultValue = 30, MinValue = 5)]
+        public int EntrySpacingSeconds { get; set; }
+
+        [Parameter("Minimum Signal Score", DefaultValue = 65, MinValue = 1)]
         public int MinimumSignalScore { get; set; }
 
-        [Parameter("Risk Reward", DefaultValue = 2.0, MinValue = 0.5)]
+        [Parameter("Risk Reward", DefaultValue = 2.5, MinValue = 0.5)]
         public double RiskReward { get; set; }
 
-        [Parameter("SL ATR Multiplier", DefaultValue = 1.0, MinValue = 0.2)]
-        public double StopAtrMultiplier { get; set; }
+        [Parameter("SL ATR Multiplier", DefaultValue = 1.2, MinValue = 0.1)]
+        public double SlAtrMultiplier { get; set; }
 
-        [Parameter("Maximum Spread Pips", DefaultValue = 50, MinValue = 1)]
+        [Parameter("Maximum Spread Pips", DefaultValue = 100)]
         public double MaximumSpreadPips { get; set; }
 
-        [Parameter("One Trade At A Time", DefaultValue = true)]
-        public bool OneTradeAtATime { get; set; }
+        // =====================================================
+        // TRAILING STOP
+        // =====================================================
 
         [Parameter("Enable Trailing Stop", DefaultValue = true)]
         public bool EnableTrailingStop { get; set; }
 
-        [Parameter("Breakeven Trigger R", DefaultValue = 1.0, MinValue = 0.2)]
+        [Parameter("Breakeven Trigger R", DefaultValue = 1.0, MinValue = 0.1)]
         public double BreakevenTriggerR { get; set; }
 
-        [Parameter("Trailing ATR Multiplier", DefaultValue = 1.0, MinValue = 0.2)]
+        [Parameter("Trailing ATR Multiplier", DefaultValue = 1.0, MinValue = 0.1)]
         public double TrailingAtrMultiplier { get; set; }
 
-        private const string BotLabel = "GOLD_AI_BOT";
+        [Parameter("Breakeven Buffer Pips", DefaultValue = 2)]
+        public double BreakevenBufferPips { get; set; }
 
+        // =====================================================
+        // STATE
+        // =====================================================
+
+        private const string Label = "US100_MULTI_AI";
+
+        private Bars _m1;
         private Bars _m5;
         private Bars _m15;
-        private Bars _h1;
 
-        private ExponentialMovingAverage _m5Ema20;
-        private ExponentialMovingAverage _m5Ema50;
-        private ExponentialMovingAverage _m15Ema20;
-        private ExponentialMovingAverage _m15Ema50;
-        private ExponentialMovingAverage _h1Ema50;
-        private ExponentialMovingAverage _h1Ema200;
+        private DateTime _lastEntryTime = DateTime.MinValue;
 
-        private RelativeStrengthIndex _m5Rsi;
-        private MacdHistogram _m5Macd;
-        private AverageTrueRange _m5Atr;
+        private readonly Dictionary<long, double> _initialRisk =
+            new Dictionary<long, double>();
 
-        private DateTime _lastProcessedCandle = DateTime.MinValue;
+        // =====================================================
+        // START
+        // =====================================================
 
         protected override void OnStart()
         {
-            string cleanSymbol = SymbolName
+            string symbol =
+                SymbolName
                 .ToUpperInvariant()
                 .Replace("/", "")
-                .Replace("-", "");
+                .Replace("-", "")
+                .Replace(".", "");
 
-            if (!cleanSymbol.Contains("XAU") || !cleanSymbol.Contains("USD"))
+            bool valid =
+                symbol.Contains("US100") ||
+                symbol.Contains("NAS100") ||
+                symbol.Contains("USTEC") ||
+                symbol.Contains("NASDAQ");
+
+            if (!valid)
             {
-                Print("ERROR: Attach this bot to an XAUUSD/Gold chart.");
+                Print("ERROR: Run this bot on US100 / NAS100 / USTEC only.");
                 Stop();
                 return;
             }
 
-            _m5 = MarketData.GetBars(TimeFrame.Minute5, SymbolName);
-            _m15 = MarketData.GetBars(TimeFrame.Minute15, SymbolName);
-            _h1 = MarketData.GetBars(TimeFrame.Hour, SymbolName);
+            _m1 = MarketData.GetBars(
+                TimeFrame.Minute,
+                SymbolName
+            );
 
-            _m5Ema20 = Indicators.ExponentialMovingAverage(_m5.ClosePrices, 20);
-            _m5Ema50 = Indicators.ExponentialMovingAverage(_m5.ClosePrices, 50);
+            _m5 = MarketData.GetBars(
+                TimeFrame.Minute5,
+                SymbolName
+            );
 
-            _m15Ema20 = Indicators.ExponentialMovingAverage(_m15.ClosePrices, 20);
-            _m15Ema50 = Indicators.ExponentialMovingAverage(_m15.ClosePrices, 50);
+            _m15 = MarketData.GetBars(
+                TimeFrame.Minute15,
+                SymbolName
+            );
 
-            _h1Ema50 = Indicators.ExponentialMovingAverage(_h1.ClosePrices, 50);
-            _h1Ema200 = Indicators.ExponentialMovingAverage(_h1.ClosePrices, 200);
-
-            _m5Rsi = Indicators.RelativeStrengthIndex(_m5.ClosePrices, 14);
-            _m5Macd = Indicators.MacdHistogram(_m5.ClosePrices, 26, 12, 9);
-            _m5Atr = Indicators.AverageTrueRange(_m5, 14, MovingAverageType.Exponential);
+            Positions.Closed += OnPositionClosed;
 
             Timer.Start(1);
 
-            Chart.DrawStaticText(
-                "BOT_STATUS",
-                EnableRealTrading
-                    ? "GOLD AI BOT\nREAL TRADING ENABLED"
-                    : "GOLD AI BOT\nSIGNAL/DEMO MODE",
-                VerticalAlignment.Bottom,
-                HorizontalAlignment.Left,
-                EnableRealTrading ? Color.Lime : Color.Yellow
-            );
+            Print("==========================================");
+            Print("US100 MULTI-TRADE BOT STARTED");
+            Print("MAX POSITIONS: {0}", MaximumOpenTrades);
+            Print("R:R: 1:{0}", RiskReward);
+            Print("TRAILING STOP: {0}", EnableTrailingStop);
+            Print("REAL TRADING: {0}", EnableRealTrading);
+            Print("==========================================");
 
-            Print("Gold AI Trading Bot started.");
-            Print("Real trading: {0}", EnableRealTrading);
-            Print("Minimum score: {0}", MinimumSignalScore);
+            AnalyseAndTrade();
         }
+
+        // =====================================================
+        // TIMER
+        // =====================================================
 
         protected override void OnTimer()
         {
-            if (!HasEnoughData())
+            ManageTrailingStops();
+
+            AnalyseAndTrade();
+        }
+
+        // =====================================================
+        // MAIN ENGINE
+        // =====================================================
+
+        private void AnalyseAndTrade()
+        {
+            if (
+                _m1.Count < 220 ||
+                _m5.Count < 220 ||
+                _m15.Count < 220
+            )
                 return;
 
-            int m5Index = _m5.Count - 2;
-            DateTime candleTime = _m5.OpenTimes[m5Index];
+            Position[] openPositions =
+                Positions.FindAll(
+                    Label,
+                    SymbolName
+                );
 
-            if (candleTime != _lastProcessedCandle)
-            {
-                _lastProcessedCandle = candleTime;
-                AnalyseAndTrade(m5Index);
-            }
+            if (
+                openPositions.Length >=
+                MaximumOpenTrades
+            )
+                return;
 
-            ManageTrailingStop();
-        }
+            if (
+                (Server.Time - _lastEntryTime)
+                .TotalSeconds <
+                EntrySpacingSeconds
+            )
+                return;
 
-        private bool HasEnoughData()
-        {
-            return _m5 != null &&
-                   _m15 != null &&
-                   _h1 != null &&
-                   _m5.Count >= 210 &&
-                   _m15.Count >= 60 &&
-                   _h1.Count >= 210;
-        }
+            double spreadPips =
+                (
+                    Symbol.Ask -
+                    Symbol.Bid
+                )
+                /
+                Symbol.PipSize;
 
-        private void AnalyseAndTrade(int m5Index)
-        {
-            int m15Index = _m15.Count - 2;
-            int h1Index = _h1.Count - 2;
+            if (
+                spreadPips >
+                MaximumSpreadPips
+            )
+                return;
+
+            Analysis m1 =
+                Analyse(
+                    _m1,
+                    _m1.Count - 2
+                );
+
+            Analysis m5 =
+                Analyse(
+                    _m5,
+                    _m5.Count - 2
+                );
+
+            Analysis m15 =
+                Analyse(
+                    _m15,
+                    _m15.Count - 2
+                );
 
             int buyScore = 0;
             int sellScore = 0;
 
-            double price = _m5.ClosePrices[m5Index];
-            double atr = _m5Atr.Result[m5Index];
-            double rsi = _m5Rsi.Result[m5Index];
-            double macd = _m5Macd.Histogram[m5Index];
+            // =================================================
+            // M15 TREND
+            // =================================================
 
-            // H1 main trend
-            if (_h1Ema50.Result[h1Index] > _h1Ema200.Result[h1Index] &&
-                _h1.ClosePrices[h1Index] > _h1Ema200.Result[h1Index])
-            {
+            if (m15.Trend == "BUY")
                 buyScore += 25;
-            }
-            else if (_h1Ema50.Result[h1Index] < _h1Ema200.Result[h1Index] &&
-                     _h1.ClosePrices[h1Index] < _h1Ema200.Result[h1Index])
-            {
+
+            else if (m15.Trend == "SELL")
                 sellScore += 25;
-            }
 
-            // M15 confirmation
-            if (_m15Ema20.Result[m15Index] > _m15Ema50.Result[m15Index] &&
-                _m15.ClosePrices[m15Index] > _m15Ema20.Result[m15Index])
-            {
+            // =================================================
+            // M5 TREND
+            // =================================================
+
+            if (m5.Trend == "BUY")
                 buyScore += 20;
-            }
-            else if (_m15Ema20.Result[m15Index] < _m15Ema50.Result[m15Index] &&
-                     _m15.ClosePrices[m15Index] < _m15Ema20.Result[m15Index])
-            {
+
+            else if (m5.Trend == "SELL")
                 sellScore += 20;
-            }
 
-            // M5 trend
-            if (_m5Ema20.Result[m5Index] > _m5Ema50.Result[m5Index] &&
-                price > _m5Ema20.Result[m5Index])
-            {
-                buyScore += 15;
-            }
-            else if (_m5Ema20.Result[m5Index] < _m5Ema50.Result[m5Index] &&
-                     price < _m5Ema20.Result[m5Index])
-            {
-                sellScore += 15;
-            }
+            // =================================================
+            // M1 ENTRY
+            // =================================================
 
-            // RSI momentum
-            if (rsi >= 52 && rsi <= 70)
-                buyScore += 10;
-            else if (rsi >= 30 && rsi <= 48)
-                sellScore += 10;
-
-            // MACD
-            if (macd > 0)
-                buyScore += 10;
-            else if (macd < 0)
-                sellScore += 10;
-
-            // Three-candle confirmation
-            if (ThreeBullishCandles(m5Index))
+            if (m1.Trend == "BUY")
                 buyScore += 15;
 
-            if (ThreeBearishCandles(m5Index))
+            else if (m1.Trend == "SELL")
                 sellScore += 15;
 
-            // Breakout
-            double previousHigh = HighestHigh(m5Index - 1, 20);
-            double previousLow = LowestLow(m5Index - 1, 20);
+            // =================================================
+            // FULL ALIGNMENT
+            // =================================================
 
-            if (price > previousHigh)
+            if (
+                m1.Trend == "BUY" &&
+                m5.Trend == "BUY" &&
+                m15.Trend == "BUY"
+            )
+                buyScore += 15;
+
+            if (
+                m1.Trend == "SELL" &&
+                m5.Trend == "SELL" &&
+                m15.Trend == "SELL"
+            )
+                sellScore += 15;
+
+            // =================================================
+            // RSI
+            // =================================================
+
+            if (
+                m1.Rsi >= 52 &&
+                m1.Rsi <= 72
+            )
                 buyScore += 10;
 
-            if (price < previousLow)
+            else if (
+                m1.Rsi >= 28 &&
+                m1.Rsi <= 48
+            )
                 sellScore += 10;
 
-            string signal = "WAIT";
-            int confidence = Math.Max(buyScore, sellScore);
+            // =================================================
+            // MOMENTUM
+            // =================================================
 
-            if (buyScore >= MinimumSignalScore && buyScore >= sellScore + 10)
+            if (m1.Momentum > 0)
+                buyScore += 10;
+
+            else if (m1.Momentum < 0)
+                sellScore += 10;
+
+            // =================================================
+            // CANDLE DIRECTION
+            // =================================================
+
+            int index =
+                _m1.Count - 2;
+
+            if (
+                _m1.ClosePrices[index] >
+                _m1.OpenPrices[index]
+            )
+                buyScore += 5;
+
+            else if (
+                _m1.ClosePrices[index] <
+                _m1.OpenPrices[index]
+            )
+                sellScore += 5;
+
+            string signal =
+                "WAIT";
+
+            if (
+                buyScore >= MinimumSignalScore &&
+                buyScore > sellScore + 10
+            )
                 signal = "BUY";
-            else if (sellScore >= MinimumSignalScore && sellScore >= buyScore + 10)
+
+            else if (
+                sellScore >= MinimumSignalScore &&
+                sellScore > buyScore + 10
+            )
                 signal = "SELL";
 
-            DrawSignal(signal, buyScore, sellScore, confidence, price);
-
             Print(
-                "{0} | Signal: {1} | Buy: {2} | Sell: {3} | RSI: {4:F1} | ATR: {5:F2}",
-                _m5.OpenTimes[m5Index],
-                signal,
+                "US100 | BUY {0} | SELL {1} | SIGNAL {2} | OPEN {3}/{4}",
                 buyScore,
                 sellScore,
-                rsi,
-                atr
+                signal,
+                openPositions.Length,
+                MaximumOpenTrades
             );
 
-            if (signal == "WAIT" || atr <= 0)
+            if (signal == "WAIT")
                 return;
 
             if (!EnableRealTrading)
             {
-                Print("Signal detected, but real trading is disabled.");
+                Print(
+                    "Signal found but real trading is OFF."
+                );
+
                 return;
             }
 
-            if (OneTradeAtATime &&
-                Positions.FindAll(BotLabel, SymbolName).Length > 0)
-            {
-                Print("Trade blocked: an existing bot position is open.");
-                return;
-            }
-
-            double spreadPips = (Symbol.Ask - Symbol.Bid) / Symbol.PipSize;
-
-            if (spreadPips > MaximumSpreadPips)
-            {
-                Print("Trade blocked: spread is {0:F1} pips.", spreadPips);
-                return;
-            }
-
-            ExecuteTrade(signal, atr);
+            OpenTrade(
+                signal,
+                m1.Atr
+            );
         }
 
-        private void ExecuteTrade(string signal, double atr)
+        // =====================================================
+        // OPEN TRADE
+        // =====================================================
+
+        private void OpenTrade(
+            string signal,
+            double atr
+        )
         {
-            TradeType tradeType =
-                signal == "BUY" ? TradeType.Buy : TradeType.Sell;
+            if (atr <= 0)
+                return;
 
-            double stopLossPips = Math.Max(
-                (atr * StopAtrMultiplier) / Symbol.PipSize,
-                1
-            );
+            TradeType type =
+                signal == "BUY"
+                ? TradeType.Buy
+                : TradeType.Sell;
 
-            double takeProfitPips = Math.Max(
-                stopLossPips * RiskReward,
-                1
-            );
+            double stopDistance =
+                atr *
+                SlAtrMultiplier;
 
-            double volume = Symbol.NormalizeVolumeInUnits(
-                VolumeInUnits,
-                RoundingMode.Down
-            );
+            double stopPips =
+                stopDistance /
+                Symbol.PipSize;
 
-            volume = Math.Max(volume, Symbol.VolumeInUnitsMin);
-            volume = Math.Min(volume, Symbol.VolumeInUnitsMax);
+            double takePips =
+                stopPips *
+                RiskReward;
 
-            TradeResult result = ExecuteMarketOrder(
-                tradeType,
-                SymbolName,
-                volume,
-                BotLabel,
-                stopLossPips,
-                takeProfitPips
-            );
+            if (stopPips < 1)
+                return;
 
-            if (result.IsSuccessful)
+            double volume =
+                Symbol.NormalizeVolumeInUnits(
+                    VolumeInUnits,
+                    RoundingMode.Down
+                );
+
+            volume =
+                Math.Max(
+                    volume,
+                    Symbol.VolumeInUnitsMin
+                );
+
+            volume =
+                Math.Min(
+                    volume,
+                    Symbol.VolumeInUnitsMax
+                );
+
+            TradeResult result =
+                ExecuteMarketOrder(
+                    type,
+                    SymbolName,
+                    volume,
+                    Label,
+                    stopPips,
+                    takePips
+                );
+
+            if (!result.IsSuccessful)
             {
                 Print(
-                    "TRADE EXECUTED | {0} | Entry: {1} | SL: {2:F1} pips | TP: {3:F1} pips",
-                    signal,
-                    result.Position.EntryPrice,
-                    stopLossPips,
-                    takeProfitPips
+                    "ORDER FAILED: {0}",
+                    result.Error
                 );
+
+                return;
             }
-            else
-            {
-                Print("ORDER FAILED: {0}", result.Error);
-            }
+
+            _lastEntryTime =
+                Server.Time;
+
+            Position position =
+                result.Position;
+
+            _initialRisk[position.Id] =
+                stopPips *
+                Symbol.PipSize;
+
+            Print("");
+            Print("🔥 US100 TRADE OPENED");
+            Print("TYPE: {0}", signal);
+            Print("ENTRY: {0}", position.EntryPrice);
+            Print("SL: {0:F1} pips", stopPips);
+            Print("TP: {0:F1} pips", takePips);
+            Print(
+                "OPEN POSITIONS: {0}/{1}",
+                Positions.FindAll(
+                    Label,
+                    SymbolName
+                ).Length,
+                MaximumOpenTrades
+            );
+            Print("");
         }
 
-        private void ManageTrailingStop()
+        // =====================================================
+        // TRAILING STOP
+        // =====================================================
+
+        private void ManageTrailingStops()
         {
-            if (!EnableTrailingStop || _m5Atr == null || _m5.Count < 20)
+            if (!EnableTrailingStop)
                 return;
 
-            int index = _m5.Count - 2;
-            double atr = _m5Atr.Result[index];
+            if (_m1.Count < 30)
+                return;
+
+            double atr =
+                ATR(
+                    _m1,
+                    _m1.Count - 2,
+                    14
+                );
 
             if (atr <= 0)
                 return;
 
-            Position[] positions = Positions.FindAll(BotLabel, SymbolName);
-
-            foreach (Position position in positions)
-            {
-                if (!position.StopLoss.HasValue)
-                    continue;
-
-                double initialRisk = Math.Abs(
-                    position.EntryPrice - position.StopLoss.Value
+            Position[] positions =
+                Positions.FindAll(
+                    Label,
+                    SymbolName
                 );
 
-                if (initialRisk <= 0)
+            foreach (
+                Position position
+                in positions
+            )
+            {
+                if (
+                    !_initialRisk
+                    .ContainsKey(
+                        position.Id
+                    )
+                )
+                {
+                    if (
+                        position.StopLoss
+                        .HasValue
+                    )
+                    {
+                        double risk =
+                            Math.Abs(
+                                position.EntryPrice -
+                                position.StopLoss.Value
+                            );
+
+                        if (risk > 0)
+                            _initialRisk[
+                                position.Id
+                            ] = risk;
+                    }
+                }
+
+                if (
+                    !_initialRisk
+                    .ContainsKey(
+                        position.Id
+                    )
+                )
                     continue;
 
-                if (position.TradeType == TradeType.Buy)
+                double initialRisk =
+                    _initialRisk[
+                        position.Id
+                    ];
+
+                double trigger =
+                    initialRisk *
+                    BreakevenTriggerR;
+
+                double buffer =
+                    BreakevenBufferPips *
+                    Symbol.PipSize;
+
+                // =================================================
+                // BUY
+                // =================================================
+
+                if (
+                    position.TradeType ==
+                    TradeType.Buy
+                )
                 {
-                    double profitDistance = Symbol.Bid - position.EntryPrice;
+                    double profit =
+                        Symbol.Bid -
+                        position.EntryPrice;
 
-                    if (profitDistance < initialRisk * BreakevenTriggerR)
+                    if (
+                        profit <
+                        trigger
+                    )
                         continue;
 
-                    double breakeven = position.EntryPrice + Symbol.PipSize;
-                    double trailing = Symbol.Bid - atr * TrailingAtrMultiplier;
-                    double newStop = Math.Max(breakeven, trailing);
+                    double breakeven =
+                        position.EntryPrice +
+                        buffer;
 
-                    if (newStop >= Symbol.Bid)
+                    double atrStop =
+                        Symbol.Bid -
+                        atr *
+                        TrailingAtrMultiplier;
+
+                    double newStop =
+                        Math.Max(
+                            breakeven,
+                            atrStop
+                        );
+
+                    if (
+                        newStop >=
+                        Symbol.Bid
+                    )
                         continue;
 
-                    if (newStop > position.StopLoss.Value)
-                        ModifyPosition(position, newStop, position.TakeProfit);
+                    if (
+                        position.StopLoss
+                        .HasValue &&
+                        newStop <=
+                        position.StopLoss.Value
+                    )
+                        continue;
+
+                    TradeResult result =
+                        ModifyPosition(
+                            position,
+                            newStop,
+                            position.TakeProfit
+                        );
+
+                    if (
+                        result.IsSuccessful
+                    )
+                    {
+                        Print(
+                            "🔒 BUY SL TRAILED TO {0}",
+                            newStop
+                        );
+                    }
                 }
+
+                // =================================================
+                // SELL
+                // =================================================
+
                 else
                 {
-                    double profitDistance = position.EntryPrice - Symbol.Ask;
+                    double profit =
+                        position.EntryPrice -
+                        Symbol.Ask;
 
-                    if (profitDistance < initialRisk * BreakevenTriggerR)
+                    if (
+                        profit <
+                        trigger
+                    )
                         continue;
 
-                    double breakeven = position.EntryPrice - Symbol.PipSize;
-                    double trailing = Symbol.Ask + atr * TrailingAtrMultiplier;
-                    double newStop = Math.Min(breakeven, trailing);
+                    double breakeven =
+                        position.EntryPrice -
+                        buffer;
 
-                    if (newStop <= Symbol.Ask)
+                    double atrStop =
+                        Symbol.Ask +
+                        atr *
+                        TrailingAtrMultiplier;
+
+                    double newStop =
+                        Math.Min(
+                            breakeven,
+                            atrStop
+                        );
+
+                    if (
+                        newStop <=
+                        Symbol.Ask
+                    )
                         continue;
 
-                    if (newStop < position.StopLoss.Value)
-                        ModifyPosition(position, newStop, position.TakeProfit);
+                    if (
+                        position.StopLoss
+                        .HasValue &&
+                        newStop >=
+                        position.StopLoss.Value
+                    )
+                        continue;
+
+                    TradeResult result =
+                        ModifyPosition(
+                            position,
+                            newStop,
+                            position.TakeProfit
+                        );
+
+                    if (
+                        result.IsSuccessful
+                    )
+                    {
+                        Print(
+                            "🔒 SELL SL TRAILED TO {0}",
+                            newStop
+                        );
+                    }
                 }
             }
         }
 
-        private bool ThreeBullishCandles(int index)
-        {
-            if (index < 2)
-                return false;
+        // =====================================================
+        // ANALYSIS
+        // =====================================================
 
-            return IsBullish(index) &&
-                   IsBullish(index - 1) &&
-                   IsBullish(index - 2);
-        }
-
-        private bool ThreeBearishCandles(int index)
-        {
-            if (index < 2)
-                return false;
-
-            return IsBearish(index) &&
-                   IsBearish(index - 1) &&
-                   IsBearish(index - 2);
-        }
-
-        private bool IsBullish(int index)
-        {
-            return _m5.ClosePrices[index] > _m5.OpenPrices[index];
-        }
-
-        private bool IsBearish(int index)
-        {
-            return _m5.ClosePrices[index] < _m5.OpenPrices[index];
-        }
-
-        private double HighestHigh(int endIndex, int lookback)
-        {
-            double highest = double.MinValue;
-            int start = Math.Max(0, endIndex - lookback + 1);
-
-            for (int i = start; i <= endIndex; i++)
-                highest = Math.Max(highest, _m5.HighPrices[i]);
-
-            return highest;
-        }
-
-        private double LowestLow(int endIndex, int lookback)
-        {
-            double lowest = double.MaxValue;
-            int start = Math.Max(0, endIndex - lookback + 1);
-
-            for (int i = start; i <= endIndex; i++)
-                lowest = Math.Min(lowest, _m5.LowPrices[i]);
-
-            return lowest;
-        }
-
-        private void DrawSignal(
-            string signal,
-            int buyScore,
-            int sellScore,
-            int confidence,
-            double price
+        private Analysis Analyse(
+            Bars bars,
+            int index
         )
         {
-            Color color = Color.Yellow;
-            string heading = "WAIT";
+            double[] closes =
+                GetCloses(
+                    bars,
+                    index,
+                    220
+                );
 
-            if (signal == "BUY")
-            {
-                color = Color.Lime;
-                heading = "BULL BUY SIGNAL";
-            }
-            else if (signal == "SELL")
-            {
-                color = Color.Red;
-                heading = "BEAR SELL SIGNAL";
-            }
+            double ema20 =
+                EMA(
+                    closes,
+                    20
+                );
 
-            Chart.DrawStaticText(
-                "LIVE_SIGNAL",
-                heading +
-                "\nBUY SCORE: " + buyScore +
-                "\nSELL SCORE: " + sellScore +
-                "\nCONFIDENCE: " + confidence + "%" +
-                "\nPRICE: " + price.ToString("F2"),
-                VerticalAlignment.Top,
-                HorizontalAlignment.Right,
-                color
-            );
+            double ema50 =
+                EMA(
+                    closes,
+                    50
+                );
+
+            double ema200 =
+                EMA(
+                    closes,
+                    200
+                );
+
+            double rsi =
+                RSI(
+                    closes,
+                    14
+                );
+
+            double momentum =
+                Momentum(
+                    closes,
+                    10
+                );
+
+            double atr =
+                ATR(
+                    bars,
+                    index,
+                    14
+                );
+
+            double price =
+                closes[
+                    closes.Length - 1
+                ];
+
+            int bullish = 0;
+            int bearish = 0;
+
+            if (
+                ema20 >
+                ema50
+            )
+                bullish += 2;
+            else
+                bearish += 2;
+
+            if (
+                ema50 >
+                ema200
+            )
+                bullish += 3;
+            else
+                bearish += 3;
+
+            if (
+                price >
+                ema200
+            )
+                bullish += 2;
+            else
+                bearish += 2;
+
+            if (
+                momentum >
+                0
+            )
+                bullish += 1;
+            else
+                bearish += 1;
+
+            if (
+                rsi >
+                50
+            )
+                bullish += 1;
+            else
+                bearish += 1;
+
+            string trend;
+
+            if (
+                bullish >=
+                bearish + 2
+            )
+                trend =
+                    "BUY";
+
+            else if (
+                bearish >=
+                bullish + 2
+            )
+                trend =
+                    "SELL";
+
+            else
+                trend =
+                    "NEUTRAL";
+
+            return new Analysis
+            {
+                Trend =
+                    trend,
+
+                Rsi =
+                    rsi,
+
+                Momentum =
+                    momentum,
+
+                Atr =
+                    atr
+            };
         }
+
+        // =====================================================
+        // EMA
+        // =====================================================
+
+        private double EMA(
+            double[] values,
+            int period
+        )
+        {
+            if (
+                values.Length <
+                period
+            )
+                return values[
+                    values.Length - 1
+                ];
+
+            double ema =
+                values
+                .Take(period)
+                .Average();
+
+            double multiplier =
+                2.0 /
+                (
+                    period +
+                    1
+                );
+
+            for (
+                int i = period;
+                i < values.Length;
+                i++
+            )
+            {
+                ema =
+                    (
+                        values[i] -
+                        ema
+                    )
+                    *
+                    multiplier
+                    +
+                    ema;
+            }
+
+            return ema;
+        }
+
+        // =====================================================
+        // RSI
+        // =====================================================
+
+        private double RSI(
+            double[] closes,
+            int period
+        )
+        {
+            if (
+                closes.Length <
+                period + 1
+            )
+                return 50;
+
+            double gain = 0;
+            double loss = 0;
+
+            for (
+                int i = 1;
+                i <= period;
+                i++
+            )
+            {
+                double change =
+                    closes[i] -
+                    closes[i - 1];
+
+                if (change > 0)
+                    gain += change;
+                else
+                    loss += -change;
+            }
+
+            gain /= period;
+            loss /= period;
+
+            for (
+                int i =
+                    period + 1;
+                i < closes.Length;
+                i++
+            )
+            {
+                double change =
+                    closes[i] -
+                    closes[i - 1];
+
+                double currentGain =
+                    Math.Max(
+                        change,
+                        0
+                    );
+
+                double currentLoss =
+                    Math.Max(
+                        -change,
+                        0
+                    );
+
+                gain =
+                    (
+                        gain *
+                        (
+                            period -
+                            1
+                        )
+                        +
+                        currentGain
+                    )
+                    /
+                    period;
+
+                loss =
+                    (
+                        loss *
+                        (
+                            period -
+                            1
+                        )
+                        +
+                        currentLoss
+                    )
+                    /
+                    period;
+            }
+
+            if (loss == 0)
+                return 100;
+
+            double rs =
+                gain /
+                loss;
+
+            return
+                100 -
+                (
+                    100 /
+                    (
+                        1 +
+                        rs
+                    )
+                );
+        }
+
+        // =====================================================
+        // MOMENTUM
+        // =====================================================
+
+        private double Momentum(
+            double[] closes,
+            int period
+        )
+        {
+            if (
+                closes.Length <=
+                period
+            )
+                return 0;
+
+            double old =
+                closes[
+                    closes.Length -
+                    period -
+                    1
+                ];
+
+            double current =
+                closes[
+                    closes.Length -
+                    1
+                ];
+
+            if (old == 0)
+                return 0;
+
+            return
+                (
+                    (
+                        current -
+                        old
+                    )
+                    /
+                    old
+                )
+                *
+                100;
+        }
+
+        // =====================================================
+        // ATR
+        // =====================================================
+
+        private double ATR(
+            Bars bars,
+            int index,
+            int period
+        )
+        {
+            List<double> ranges =
+                new List<double>();
+
+            int start =
+                Math.Max(
+                    1,
+                    index -
+                    period *
+                    4
+                );
+
+            for (
+                int i = start;
+                i <= index;
+                i++
+            )
+            {
+                double highLow =
+                    bars.HighPrices[i] -
+                    bars.LowPrices[i];
+
+                double highClose =
+                    Math.Abs(
+                        bars.HighPrices[i] -
+                        bars.ClosePrices[
+                            i - 1
+                        ]
+                    );
+
+                double lowClose =
+                    Math.Abs(
+                        bars.LowPrices[i] -
+                        bars.ClosePrices[
+                            i - 1
+                        ]
+                    );
+
+                ranges.Add(
+                    Math.Max(
+                        highLow,
+                        Math.Max(
+                            highClose,
+                            lowClose
+                        )
+                    )
+                );
+            }
+
+            if (
+                ranges.Count <
+                period
+            )
+                return 0;
+
+            double atr =
+                ranges
+                .Take(period)
+                .Average();
+
+            for (
+                int i = period;
+                i < ranges.Count;
+                i++
+            )
+            {
+                atr =
+                    (
+                        atr *
+                        (
+                            period -
+                            1
+                        )
+                        +
+                        ranges[i]
+                    )
+                    /
+                    period;
+            }
+
+            return atr;
+        }
+
+        // =====================================================
+        // CLOSE DATA
+        // =====================================================
+
+        private double[] GetCloses(
+            Bars bars,
+            int index,
+            int amount
+        )
+        {
+            int start =
+                Math.Max(
+                    0,
+                    index -
+                    amount +
+                    1
+                );
+
+            List<double> data =
+                new List<double>();
+
+            for (
+                int i = start;
+                i <= index;
+                i++
+            )
+            {
+                data.Add(
+                    bars.ClosePrices[i]
+                );
+            }
+
+            return data.ToArray();
+        }
+
+        // =====================================================
+        // POSITION CLOSED
+        // =====================================================
+
+        private void OnPositionClosed(
+            PositionClosedEventArgs args
+        )
+        {
+            if (
+                _initialRisk
+                .ContainsKey(
+                    args.Position.Id
+                )
+            )
+            {
+                _initialRisk.Remove(
+                    args.Position.Id
+                );
+            }
+        }
+
+        // =====================================================
+        // STOP
+        // =====================================================
 
         protected override void OnStop()
         {
             Timer.Stop();
-            Chart.RemoveObject("LIVE_SIGNAL");
-            Chart.RemoveObject("BOT_STATUS");
-            Print("Gold AI Trading Bot stopped.");
+
+            Positions.Closed -=
+                OnPositionClosed;
+        }
+
+        // =====================================================
+        // DATA
+        // =====================================================
+
+        private class Analysis
+        {
+            public string Trend;
+            public double Rsi;
+            public double Momentum;
+            public double Atr;
         }
     }
 }
