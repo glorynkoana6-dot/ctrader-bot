@@ -5,13 +5,9 @@ using cAlgo.API;
 namespace cAlgo.Robots
 {
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-    public class XAUUSD_OneShot_Straddle : Robot
+    public class XAUUSD_Hedge_Stop_Repeater : Robot
     {
-        private const string Label = "XAU_STRADDLE";
-
-        // =====================================================
-        // SETTINGS
-        // =====================================================
+        private const string Label = "XAU_HEDGE_REPEAT";
 
         [Parameter("Enable Trading", DefaultValue = false)]
         public bool EnableTrading { get; set; }
@@ -19,7 +15,12 @@ namespace cAlgo.Robots
         [Parameter("Lot Size", DefaultValue = 0.01, MinValue = 0.01)]
         public double LotSize { get; set; }
 
-        [Parameter("Entry Distance Price", DefaultValue = 0.50, MinValue = 0.01)]
+        // 30 BUY + 30 SELL = 60 pending orders
+        [Parameter("Stops Per Side", DefaultValue = 30, MinValue = 15, MaxValue = 100)]
+        public int StopsPerSide { get; set; }
+
+        // Distance from current market price
+        [Parameter("Entry Distance Price", DefaultValue = 0.30, MinValue = 0.01)]
         public double EntryDistancePrice { get; set; }
 
         [Parameter("Minimum Net Profit", DefaultValue = 0.01, MinValue = 0)]
@@ -28,30 +29,17 @@ namespace cAlgo.Robots
         [Parameter("Maximum Spread Pips", DefaultValue = 100, MinValue = 0)]
         public double MaximumSpreadPips { get; set; }
 
-        [Parameter("Reposition Pending Orders", DefaultValue = true)]
-        public bool RepositionPendingOrders { get; set; }
-
-        [Parameter("Reposition Distance Price", DefaultValue = 0.25, MinValue = 0.01)]
-        public double RepositionDistancePrice { get; set; }
-
-        [Parameter("Cancel Orders When Stopped", DefaultValue = true)]
-        public bool CancelOrdersWhenStopped { get; set; }
-
-
-        // =====================================================
-        // INTERNAL
-        // =====================================================
+        [Parameter("Cancel Orders On Stop", DefaultValue = true)]
+        public bool CancelOrdersOnStop { get; set; }
 
         private double _volume;
 
-
-        // =====================================================
-        // START
-        // =====================================================
+        private bool _cycleTriggered;
+        private bool _creatingOrders;
 
         protected override void OnStart()
         {
-            string symbol =
+            string clean =
                 SymbolName
                 .ToUpperInvariant()
                 .Replace("/", "")
@@ -60,22 +48,17 @@ namespace cAlgo.Robots
                 .Replace("_", "")
                 .Replace(" ", "");
 
-            bool gold =
-                symbol.Contains("XAUUSD") ||
-                symbol.Contains("XAU") ||
-                symbol.Contains("GOLD");
+            bool isGold =
+                clean.Contains("XAUUSD") ||
+                clean.Contains("XAU") ||
+                clean.Contains("GOLD");
 
-            if (!gold)
+            if (!isGold)
             {
-                Print("ERROR: XAUUSD / GOLD ONLY.");
+                Print("ERROR: RUN THIS BOT ON XAUUSD / GOLD.");
                 Stop();
                 return;
             }
-
-
-            // =================================================
-            // 0.01 LOT -> BROKER VOLUME UNITS
-            // =================================================
 
             _volume =
                 Symbol.QuantityToVolumeInUnits(
@@ -100,73 +83,31 @@ namespace cAlgo.Robots
                     Symbol.VolumeInUnitsMax
                 );
 
-
-            // =================================================
-            // EVENTS
-            // =================================================
-
-            Positions.Opened +=
-                OnPositionOpened;
-
-            Positions.Closed +=
-                OnPositionClosed;
-
-
-            // =================================================
-            // RUN EVERY SECOND
-            // =================================================
+            Positions.Opened += OnPositionOpened;
+            Positions.Closed += OnPositionClosed;
 
             Timer.Start(1);
 
-
-            Print("==========================================");
-            Print("XAUUSD BUY STOP / SELL STOP BOT");
+            Print("=========================================");
+            Print("XAUUSD HEDGE STOP REPEATER");
+            Print("BUY STOPS: {0}", StopsPerSide);
+            Print("SELL STOPS: {0}", StopsPerSide);
+            Print("TOTAL STOPS: {0}", StopsPerSide * 2);
             Print("LOT SIZE: {0}", LotSize);
-            Print("CHECK SPEED: 1 SECOND");
-            Print("BUY STOP ABOVE PRICE");
-            Print("SELL STOP BELOW PRICE");
-            Print("WHEN ONE TRIGGERS -> OTHER SIDE CANCELLED");
-            Print("POSITION CLOSES AT POSITIVE NET PROFIT");
-            Print("TRADING ENABLED: {0}", EnableTrading);
-            Print("==========================================");
-
+            Print("CLOSE: ANY POSITIVE NET PROFIT");
+            Print("REPEAT: AUTOMATIC");
+            Print("=========================================");
 
             if (EnableTrading)
-            {
-                RunEngine();
-            }
+                StartNewCycle();
         }
-
-
-        // =====================================================
-        // EVERY SECOND
-        // =====================================================
 
         protected override void OnTimer()
         {
             if (!EnableTrading)
                 return;
 
-            RunEngine();
-        }
-
-
-        // =====================================================
-        // MAIN ENGINE
-        // =====================================================
-
-        private void RunEngine()
-        {
-            // ---------------------------------------------
-            // 1. CLOSE TRADES THAT ARE PROFITABLE
-            // ---------------------------------------------
-
             CloseProfitablePositions();
-
-
-            // ---------------------------------------------
-            // 2. CHECK WHETHER A POSITION IS STILL OPEN
-            // ---------------------------------------------
 
             Position[] positions =
                 Positions.FindAll(
@@ -174,28 +115,231 @@ namespace cAlgo.Robots
                     SymbolName
                 );
 
+            // =============================================
+            // ACTIVE TRADE CYCLE
+            // =============================================
 
             if (positions.Length > 0)
             {
-                // A pending order has triggered.
-                // Do not leave the opposite pending order active.
+                _cycleTriggered = true;
 
+                // Once something triggers, remove every
+                // untriggered stop order.
                 CancelAllPendingOrders();
 
                 return;
             }
 
+            // =============================================
+            // PREVIOUS POSITIONS HAVE ALL CLOSED
+            // =============================================
 
-            // ---------------------------------------------
-            // 3. NO POSITION -> KEEP STRADDLE READY
-            // ---------------------------------------------
+            if (_cycleTriggered)
+            {
+                CancelAllPendingOrders();
 
-            MaintainStraddle();
+                _cycleTriggered = false;
+
+                StartNewCycle();
+
+                return;
+            }
+
+            // =============================================
+            // MAKE SURE A FULL GRID EXISTS
+            // =============================================
+
+            int pending =
+                PendingOrders.Count(
+                    x =>
+                        x.Label == Label &&
+                        x.SymbolName == SymbolName
+                );
+
+            int required =
+                StopsPerSide * 2;
+
+            if (
+                pending < required &&
+                !_creatingOrders
+            )
+            {
+                CancelAllPendingOrders();
+
+                StartNewCycle();
+            }
         }
 
+        // =====================================================
+        // START A NEW HEDGE CYCLE
+        // =====================================================
+
+        private void StartNewCycle()
+        {
+            if (_creatingOrders)
+                return;
+
+            if (
+                Positions.FindAll(
+                    Label,
+                    SymbolName
+                ).Length > 0
+            )
+                return;
+
+            double spread =
+                (
+                    Symbol.Ask -
+                    Symbol.Bid
+                )
+                /
+                Symbol.PipSize;
+
+            if (spread > MaximumSpreadPips)
+            {
+                Print(
+                    "SPREAD TOO HIGH: {0:F2}",
+                    spread
+                );
+
+                return;
+            }
+
+            _creatingOrders = true;
+
+            CancelAllPendingOrders();
+
+            double buyPrice =
+                NormalizePrice(
+                    Symbol.Ask +
+                    EntryDistancePrice
+                );
+
+            double sellPrice =
+                NormalizePrice(
+                    Symbol.Bid -
+                    EntryDistancePrice
+                );
+
+            Print("");
+            Print("NEW HEDGE CYCLE");
+            Print("CURRENT BID: {0}", Symbol.Bid);
+            Print("CURRENT ASK: {0}", Symbol.Ask);
+            Print("BUY STOP LEVEL: {0}", buyPrice);
+            Print("SELL STOP LEVEL: {0}", sellPrice);
+
+            int buyPlaced = 0;
+            int sellPlaced = 0;
+
+            // =================================================
+            // 30 BUY STOPS AT SAME LEVEL
+            // =================================================
+
+            for (
+                int i = 0;
+                i < StopsPerSide;
+                i++
+            )
+            {
+                TradeResult result =
+                    PlaceStopOrder(
+                        TradeType.Buy,
+                        SymbolName,
+                        _volume,
+                        buyPrice,
+                        Label
+                    );
+
+                if (result.IsSuccessful)
+                {
+                    buyPlaced++;
+                }
+                else
+                {
+                    Print(
+                        "BUY STOP #{0} FAILED: {1}",
+                        i + 1,
+                        result.Error
+                    );
+                }
+            }
+
+            // =================================================
+            // 30 SELL STOPS AT SAME LEVEL
+            // =================================================
+
+            for (
+                int i = 0;
+                i < StopsPerSide;
+                i++
+            )
+            {
+                TradeResult result =
+                    PlaceStopOrder(
+                        TradeType.Sell,
+                        SymbolName,
+                        _volume,
+                        sellPrice,
+                        Label
+                    );
+
+                if (result.IsSuccessful)
+                {
+                    sellPlaced++;
+                }
+                else
+                {
+                    Print(
+                        "SELL STOP #{0} FAILED: {1}",
+                        i + 1,
+                        result.Error
+                    );
+                }
+            }
+
+            _creatingOrders = false;
+
+            Print(
+                "READY | BUY STOPS {0} | SELL STOPS {1}",
+                buyPlaced,
+                sellPlaced
+            );
+
+            Print("");
+        }
 
         // =====================================================
-        // CLOSE AT ANY POSITIVE NET PROFIT
+        // TRIGGER DETECTED
+        // =====================================================
+
+        private void OnPositionOpened(
+            PositionOpenedEventArgs args
+        )
+        {
+            Position position =
+                args.Position;
+
+            if (
+                position.Label != Label ||
+                position.SymbolName != SymbolName
+            )
+                return;
+
+            _cycleTriggered = true;
+
+            Print(
+                "TRIGGERED | {0} | ID {1} | ENTRY {2}",
+                position.TradeType,
+                position.Id,
+                position.EntryPrice
+            );
+
+            // Remove opposite and remaining stops.
+            CancelAllPendingOrders();
+        }
+
+        // =====================================================
+        // CLOSE EVERY TRIGGERED POSITION AT ANY PROFIT
         // =====================================================
 
         private void CloseProfitablePositions()
@@ -205,7 +349,6 @@ namespace cAlgo.Robots
                     Label,
                     SymbolName
                 );
-
 
             foreach (
                 Position position
@@ -218,12 +361,10 @@ namespace cAlgo.Robots
                 )
                     continue;
 
-
                 TradeResult result =
                     ClosePosition(
                         position
                     );
-
 
                 if (result.IsSuccessful)
                 {
@@ -246,269 +387,8 @@ namespace cAlgo.Robots
             }
         }
 
-
         // =====================================================
-        // KEEP ONE BUY STOP + ONE SELL STOP
-        // =====================================================
-
-        private void MaintainStraddle()
-        {
-            double spreadPips =
-                (
-                    Symbol.Ask -
-                    Symbol.Bid
-                )
-                /
-                Symbol.PipSize;
-
-
-            if (
-                spreadPips >
-                MaximumSpreadPips
-            )
-            {
-                Print(
-                    "SPREAD TOO HIGH: {0:F2}",
-                    spreadPips
-                );
-
-                return;
-            }
-
-
-            double desiredBuyPrice =
-                NormalizePrice(
-                    Symbol.Ask +
-                    EntryDistancePrice
-                );
-
-
-            double desiredSellPrice =
-                NormalizePrice(
-                    Symbol.Bid -
-                    EntryDistancePrice
-                );
-
-
-            PendingOrder buyOrder =
-                FindPendingOrder(
-                    TradeType.Buy
-                );
-
-
-            PendingOrder sellOrder =
-                FindPendingOrder(
-                    TradeType.Sell
-                );
-
-
-            // =================================================
-            // MOVE BUY STOP IF PRICE MOVED TOO FAR
-            // =================================================
-
-            if (
-                buyOrder != null &&
-                RepositionPendingOrders
-            )
-            {
-                double difference =
-                    Math.Abs(
-                        buyOrder.TargetPrice -
-                        desiredBuyPrice
-                    );
-
-
-                if (
-                    difference >=
-                    RepositionDistancePrice
-                )
-                {
-                    CancelPendingOrder(
-                        buyOrder
-                    );
-
-                    buyOrder = null;
-                }
-            }
-
-
-            // =================================================
-            // MOVE SELL STOP IF PRICE MOVED TOO FAR
-            // =================================================
-
-            if (
-                sellOrder != null &&
-                RepositionPendingOrders
-            )
-            {
-                double difference =
-                    Math.Abs(
-                        sellOrder.TargetPrice -
-                        desiredSellPrice
-                    );
-
-
-                if (
-                    difference >=
-                    RepositionDistancePrice
-                )
-                {
-                    CancelPendingOrder(
-                        sellOrder
-                    );
-
-                    sellOrder = null;
-                }
-            }
-
-
-            // =================================================
-            // CREATE BUY STOP
-            // =================================================
-
-            if (buyOrder == null)
-            {
-                PlaceBuyStop(
-                    desiredBuyPrice
-                );
-            }
-
-
-            // =================================================
-            // CREATE SELL STOP
-            // =================================================
-
-            if (sellOrder == null)
-            {
-                PlaceSellStop(
-                    desiredSellPrice
-                );
-            }
-        }
-
-
-        // =====================================================
-        // BUY STOP
-        // =====================================================
-
-        private void PlaceBuyStop(
-            double targetPrice
-        )
-        {
-            if (
-                targetPrice <=
-                Symbol.Ask
-            )
-                return;
-
-
-            TradeResult result =
-                PlaceStopOrder(
-                    TradeType.Buy,
-                    SymbolName,
-                    _volume,
-                    targetPrice,
-                    Label
-                );
-
-
-            if (result.IsSuccessful)
-            {
-                Print(
-                    "BUY STOP PLACED | {0} | LOT {1}",
-                    targetPrice,
-                    LotSize
-                );
-            }
-            else
-            {
-                Print(
-                    "BUY STOP FAILED | {0}",
-                    result.Error
-                );
-            }
-        }
-
-
-        // =====================================================
-        // SELL STOP
-        // =====================================================
-
-        private void PlaceSellStop(
-            double targetPrice
-        )
-        {
-            if (
-                targetPrice >=
-                Symbol.Bid
-            )
-                return;
-
-
-            TradeResult result =
-                PlaceStopOrder(
-                    TradeType.Sell,
-                    SymbolName,
-                    _volume,
-                    targetPrice,
-                    Label
-                );
-
-
-            if (result.IsSuccessful)
-            {
-                Print(
-                    "SELL STOP PLACED | {0} | LOT {1}",
-                    targetPrice,
-                    LotSize
-                );
-            }
-            else
-            {
-                Print(
-                    "SELL STOP FAILED | {0}",
-                    result.Error
-                );
-            }
-        }
-
-
-        // =====================================================
-        // WHEN ONE SIDE TRIGGERS
-        // =====================================================
-
-        private void OnPositionOpened(
-            PositionOpenedEventArgs args
-        )
-        {
-            Position position =
-                args.Position;
-
-
-            if (
-                position.Label != Label ||
-                position.SymbolName != SymbolName
-            )
-                return;
-
-
-            Print(
-                "TRIGGERED | {0} | ENTRY {1} | LOT {2}",
-                position.TradeType,
-                position.EntryPrice,
-                LotSize
-            );
-
-
-            // Once BUY or SELL activates,
-            // remove the opposite side immediately.
-
-            CancelAllPendingOrders();
-        }
-
-
-        // =====================================================
-        // WHEN TRADE CLOSES
+        // POSITION CLOSED
         // =====================================================
 
         private void OnPositionClosed(
@@ -518,46 +398,26 @@ namespace cAlgo.Robots
             Position position =
                 args.Position;
 
-
             if (
                 position.Label != Label ||
                 position.SymbolName != SymbolName
             )
                 return;
 
-
             Print(
-                "TRADE CLOSED | {0} | NET {1:F2}",
+                "CLOSED | {0} | ID {1} | NET {2:F2}",
                 position.TradeType,
+                position.Id,
                 position.NetProfit
             );
 
-
-            // Next 1-second cycle automatically creates
-            // a fresh BUY STOP + SELL STOP pair.
+            // Timer checks whether all triggered positions
+            // are gone. When they are, it immediately creates
+            // a completely fresh BUY/SELL stop cycle.
         }
 
-
         // =====================================================
-        // FIND PENDING ORDER
-        // =====================================================
-
-        private PendingOrder FindPendingOrder(
-            TradeType tradeType
-        )
-        {
-            return PendingOrders
-                .FirstOrDefault(
-                    order =>
-                        order.Label == Label &&
-                        order.SymbolName == SymbolName &&
-                        order.TradeType == tradeType
-                );
-        }
-
-
-        // =====================================================
-        // CANCEL PENDING ORDERS
+        // CANCEL ALL REMAINING STOPS
         // =====================================================
 
         private void CancelAllPendingOrders()
@@ -565,38 +425,25 @@ namespace cAlgo.Robots
             PendingOrder[] orders =
                 PendingOrders
                 .Where(
-                    order =>
-                        order.Label == Label &&
-                        order.SymbolName == SymbolName
+                    x =>
+                        x.Label == Label &&
+                        x.SymbolName == SymbolName
                 )
                 .ToArray();
-
 
             foreach (
                 PendingOrder order
                 in orders
             )
             {
-                TradeResult result =
-                    CancelPendingOrder(
-                        order
-                    );
-
-
-                if (result.IsSuccessful)
-                {
-                    Print(
-                        "CANCELLED {0} STOP @ {1}",
-                        order.TradeType,
-                        order.TargetPrice
-                    );
-                }
+                CancelPendingOrder(
+                    order
+                );
             }
         }
 
-
         // =====================================================
-        // NORMALIZE PRICE
+        // NORMALIZE PRICE TO BROKER TICK SIZE
         // =====================================================
 
         private double NormalizePrice(
@@ -609,7 +456,6 @@ namespace cAlgo.Robots
                     Symbol.TickSize
                 );
 
-
             return Math.Round(
                 ticks *
                 Symbol.TickSize,
@@ -617,34 +463,22 @@ namespace cAlgo.Robots
             );
         }
 
-
         // =====================================================
-        // STOP BOT
+        // STOP
         // =====================================================
 
         protected override void OnStop()
         {
             Timer.Stop();
 
+            Positions.Opened -= OnPositionOpened;
+            Positions.Closed -= OnPositionClosed;
 
-            Positions.Opened -=
-                OnPositionOpened;
-
-
-            Positions.Closed -=
-                OnPositionClosed;
-
-
-            if (
-                CancelOrdersWhenStopped
-            )
-            {
+            if (CancelOrdersOnStop)
                 CancelAllPendingOrders();
-            }
-
 
             Print(
-                "XAUUSD STRADDLE BOT STOPPED"
+                "XAUUSD HEDGE STOP REPEATER STOPPED"
             );
         }
     }
