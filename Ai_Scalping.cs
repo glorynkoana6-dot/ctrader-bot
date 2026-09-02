@@ -5,9 +5,13 @@ using cAlgo.API;
 namespace cAlgo.Robots
 {
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
-    public class XAUUSD_Hedge_Stop_Repeater : Robot
+    public class XAUUSD_Video_Stop_Ladder : Robot
     {
-        private const string Label = "XAU_HEDGE_REPEAT";
+        private const string Label = "XAU_VIDEO_LADDER";
+
+        // =====================================================
+        // SETTINGS
+        // =====================================================
 
         [Parameter("Enable Trading", DefaultValue = false)]
         public bool EnableTrading { get; set; }
@@ -19,27 +23,40 @@ namespace cAlgo.Robots
         [Parameter("Stops Per Side", DefaultValue = 30, MinValue = 15, MaxValue = 100)]
         public int StopsPerSide { get; set; }
 
-        // Distance from current market price
-        [Parameter("Entry Distance Price", DefaultValue = 0.30, MinValue = 0.01)]
-        public double EntryDistancePrice { get; set; }
+        // First order sits close to current market
+        [Parameter("First Stop Distance", DefaultValue = 0.30, MinValue = 0.01)]
+        public double FirstStopDistance { get; set; }
 
-        [Parameter("Minimum Net Profit", DefaultValue = 0.01, MinValue = 0)]
+        // Distance between each ladder level
+        [Parameter("Stop Spacing", DefaultValue = 0.20, MinValue = 0.01)]
+        public double StopSpacing { get; set; }
+
+        // Close as soon as net profit is above this
+        [Parameter("Minimum Net Profit", DefaultValue = 0.00, MinValue = 0)]
         public double MinimumNetProfit { get; set; }
 
         [Parameter("Maximum Spread Pips", DefaultValue = 100, MinValue = 0)]
         public double MaximumSpreadPips { get; set; }
 
-        [Parameter("Cancel Orders On Stop", DefaultValue = true)]
-        public bool CancelOrdersOnStop { get; set; }
+        [Parameter("Cancel Orders When Bot Stops", DefaultValue = true)]
+        public bool CancelOrdersWhenBotStops { get; set; }
+
+        // =====================================================
+        // INTERNAL STATE
+        // =====================================================
 
         private double _volume;
 
         private bool _cycleTriggered;
-        private bool _creatingOrders;
+        private bool _buildingCycle;
+
+        // =====================================================
+        // START
+        // =====================================================
 
         protected override void OnStart()
         {
-            string clean =
+            string cleanSymbol =
                 SymbolName
                 .ToUpperInvariant()
                 .Replace("/", "")
@@ -48,18 +65,19 @@ namespace cAlgo.Robots
                 .Replace("_", "")
                 .Replace(" ", "");
 
-            bool isGold =
-                clean.Contains("XAUUSD") ||
-                clean.Contains("XAU") ||
-                clean.Contains("GOLD");
+            bool gold =
+                cleanSymbol.Contains("XAUUSD") ||
+                cleanSymbol.Contains("XAU") ||
+                cleanSymbol.Contains("GOLD");
 
-            if (!isGold)
+            if (!gold)
             {
                 Print("ERROR: RUN THIS BOT ON XAUUSD / GOLD.");
                 Stop();
                 return;
             }
 
+            // Convert 0.01 lots into broker volume units
             _volume =
                 Symbol.QuantityToVolumeInUnits(
                     LotSize
@@ -86,27 +104,37 @@ namespace cAlgo.Robots
             Positions.Opened += OnPositionOpened;
             Positions.Closed += OnPositionClosed;
 
+            // Run every second
             Timer.Start(1);
 
-            Print("=========================================");
-            Print("XAUUSD HEDGE STOP REPEATER");
+            Print("================================================");
+            Print("XAUUSD VIDEO STYLE STOP LADDER");
             Print("BUY STOPS: {0}", StopsPerSide);
             Print("SELL STOPS: {0}", StopsPerSide);
             Print("TOTAL STOPS: {0}", StopsPerSide * 2);
             Print("LOT SIZE: {0}", LotSize);
-            Print("CLOSE: ANY POSITIVE NET PROFIT");
-            Print("REPEAT: AUTOMATIC");
-            Print("=========================================");
+            Print("FIRST DISTANCE: {0}", FirstStopDistance);
+            Print("SPACING: {0}", StopSpacing);
+            Print("EXIT: ANY POSITIVE NET PROFIT");
+            Print("REFRESH: EVERY SECOND");
+            Print("================================================");
 
             if (EnableTrading)
+            {
                 StartNewCycle();
+            }
         }
+
+        // =====================================================
+        // EVERY SECOND
+        // =====================================================
 
         protected override void OnTimer()
         {
             if (!EnableTrading)
                 return;
 
+            // First try to close triggered trades
             CloseProfitablePositions();
 
             Position[] positions =
@@ -115,24 +143,25 @@ namespace cAlgo.Robots
                     SymbolName
                 );
 
-            // =============================================
-            // ACTIVE TRADE CYCLE
-            // =============================================
+            // =================================================
+            // THERE IS A LIVE POSITION
+            // =================================================
 
             if (positions.Length > 0)
             {
                 _cycleTriggered = true;
 
-                // Once something triggers, remove every
-                // untriggered stop order.
+                // Video-style behavior:
+                // once something triggers,
+                // remove remaining pending stops.
                 CancelAllPendingOrders();
 
                 return;
             }
 
-            // =============================================
-            // PREVIOUS POSITIONS HAVE ALL CLOSED
-            // =============================================
+            // =================================================
+            // TRIGGERED POSITION HAS NOW CLOSED
+            // =================================================
 
             if (_cycleTriggered)
             {
@@ -145,23 +174,23 @@ namespace cAlgo.Robots
                 return;
             }
 
-            // =============================================
-            // MAKE SURE A FULL GRID EXISTS
-            // =============================================
+            // =================================================
+            // CHECK GRID STILL EXISTS
+            // =================================================
 
-            int pending =
+            int pendingCount =
                 PendingOrders.Count(
-                    x =>
-                        x.Label == Label &&
-                        x.SymbolName == SymbolName
+                    order =>
+                        order.Label == Label &&
+                        order.SymbolName == SymbolName
                 );
 
             int required =
                 StopsPerSide * 2;
 
             if (
-                pending < required &&
-                !_creatingOrders
+                pendingCount < required &&
+                !_buildingCycle
             )
             {
                 CancelAllPendingOrders();
@@ -171,12 +200,12 @@ namespace cAlgo.Robots
         }
 
         // =====================================================
-        // START A NEW HEDGE CYCLE
+        // BUILD BUY + SELL LADDER
         // =====================================================
 
         private void StartNewCycle()
         {
-            if (_creatingOrders)
+            if (_buildingCycle)
                 return;
 
             if (
@@ -187,7 +216,7 @@ namespace cAlgo.Robots
             )
                 return;
 
-            double spread =
+            double spreadPips =
                 (
                     Symbol.Ask -
                     Symbol.Bid
@@ -195,44 +224,41 @@ namespace cAlgo.Robots
                 /
                 Symbol.PipSize;
 
-            if (spread > MaximumSpreadPips)
+            if (
+                spreadPips >
+                MaximumSpreadPips
+            )
             {
                 Print(
                     "SPREAD TOO HIGH: {0:F2}",
-                    spread
+                    spreadPips
                 );
 
                 return;
             }
 
-            _creatingOrders = true;
+            _buildingCycle = true;
 
             CancelAllPendingOrders();
 
-            double buyPrice =
-                NormalizePrice(
-                    Symbol.Ask +
-                    EntryDistancePrice
-                );
+            double baseBuy =
+                Symbol.Ask +
+                FirstStopDistance;
 
-            double sellPrice =
-                NormalizePrice(
-                    Symbol.Bid -
-                    EntryDistancePrice
-                );
-
-            Print("");
-            Print("NEW HEDGE CYCLE");
-            Print("CURRENT BID: {0}", Symbol.Bid);
-            Print("CURRENT ASK: {0}", Symbol.Ask);
-            Print("BUY STOP LEVEL: {0}", buyPrice);
-            Print("SELL STOP LEVEL: {0}", sellPrice);
+            double baseSell =
+                Symbol.Bid -
+                FirstStopDistance;
 
             int buyPlaced = 0;
             int sellPlaced = 0;
 
+            Print("");
+            Print("NEW LADDER");
+            Print("BID: {0}", Symbol.Bid);
+            Print("ASK: {0}", Symbol.Ask);
+
             // =================================================
-            // 30 BUY STOPS AT SAME LEVEL
+            // BUY STOP LADDER ABOVE MARKET
             // =================================================
 
             for (
@@ -241,23 +267,48 @@ namespace cAlgo.Robots
                 i++
             )
             {
+                double targetPrice =
+                    baseBuy +
+                    (
+                        i *
+                        StopSpacing
+                    );
+
+                targetPrice =
+                    NormalizePrice(
+                        targetPrice
+                    );
+
+                if (
+                    targetPrice <=
+                    Symbol.Ask
+                )
+                    continue;
+
                 TradeResult result =
                     PlaceStopOrder(
                         TradeType.Buy,
                         SymbolName,
                         _volume,
-                        buyPrice,
+                        targetPrice,
                         Label
                     );
 
                 if (result.IsSuccessful)
                 {
                     buyPlaced++;
+
+                    Print(
+                        "BUY STOP #{0} | {1} | {2} LOT",
+                        i + 1,
+                        targetPrice,
+                        LotSize
+                    );
                 }
                 else
                 {
                     Print(
-                        "BUY STOP #{0} FAILED: {1}",
+                        "BUY STOP #{0} FAILED | {1}",
                         i + 1,
                         result.Error
                     );
@@ -265,7 +316,7 @@ namespace cAlgo.Robots
             }
 
             // =================================================
-            // 30 SELL STOPS AT SAME LEVEL
+            // SELL STOP LADDER BELOW MARKET
             // =================================================
 
             for (
@@ -274,42 +325,70 @@ namespace cAlgo.Robots
                 i++
             )
             {
+                double targetPrice =
+                    baseSell -
+                    (
+                        i *
+                        StopSpacing
+                    );
+
+                targetPrice =
+                    NormalizePrice(
+                        targetPrice
+                    );
+
+                if (
+                    targetPrice >=
+                    Symbol.Bid
+                )
+                    continue;
+
                 TradeResult result =
                     PlaceStopOrder(
                         TradeType.Sell,
                         SymbolName,
                         _volume,
-                        sellPrice,
+                        targetPrice,
                         Label
                     );
 
                 if (result.IsSuccessful)
                 {
                     sellPlaced++;
+
+                    Print(
+                        "SELL STOP #{0} | {1} | {2} LOT",
+                        i + 1,
+                        targetPrice,
+                        LotSize
+                    );
                 }
                 else
                 {
                     Print(
-                        "SELL STOP #{0} FAILED: {1}",
+                        "SELL STOP #{0} FAILED | {1}",
                         i + 1,
                         result.Error
                     );
                 }
             }
 
-            _creatingOrders = false;
+            _buildingCycle = false;
 
+            Print("");
             Print(
-                "READY | BUY STOPS {0} | SELL STOPS {1}",
+                "LADDER READY | BUY {0}/{1} | SELL {2}/{3}",
                 buyPlaced,
-                sellPlaced
+                StopsPerSide,
+                sellPlaced,
+                StopsPerSide
             );
 
             Print("");
         }
 
         // =====================================================
-        // TRIGGER DETECTED
+        // WHEN A STOP GETS TRIGGERED
         // =====================================================
 
         private void OnPositionOpened(
@@ -327,6 +406,7 @@ namespace cAlgo.Robots
 
             _cycleTriggered = true;
 
+            Print("");
             Print(
                 "TRIGGERED | {0} | ID {1} | ENTRY {2}",
                 position.TradeType,
@@ -334,12 +414,12 @@ namespace cAlgo.Robots
                 position.EntryPrice
             );
 
-            // Remove opposite and remaining stops.
+            // Remove all remaining BUY/SELL stops
             CancelAllPendingOrders();
         }
 
         // =====================================================
-        // CLOSE EVERY TRIGGERED POSITION AT ANY PROFIT
+        // CLOSE AT ANY POSITIVE PROFIT
         // =====================================================
 
         private void CloseProfitablePositions()
@@ -355,6 +435,7 @@ namespace cAlgo.Robots
                 in positions
             )
             {
+                // NetProfit includes trading costs
                 if (
                     position.NetProfit <=
                     MinimumNetProfit
@@ -411,13 +492,12 @@ namespace cAlgo.Robots
                 position.NetProfit
             );
 
-            // Timer checks whether all triggered positions
-            // are gone. When they are, it immediately creates
-            // a completely fresh BUY/SELL stop cycle.
+            // Timer will detect that all positions are closed
+            // and rebuild a completely new ladder.
         }
 
         // =====================================================
-        // CANCEL ALL REMAINING STOPS
+        // CANCEL EVERY PENDING ORDER FROM THIS BOT
         // =====================================================
 
         private void CancelAllPendingOrders()
@@ -425,9 +505,9 @@ namespace cAlgo.Robots
             PendingOrder[] orders =
                 PendingOrders
                 .Where(
-                    x =>
-                        x.Label == Label &&
-                        x.SymbolName == SymbolName
+                    order =>
+                        order.Label == Label &&
+                        order.SymbolName == SymbolName
                 )
                 .ToArray();
 
@@ -443,7 +523,7 @@ namespace cAlgo.Robots
         }
 
         // =====================================================
-        // NORMALIZE PRICE TO BROKER TICK SIZE
+        // PRICE NORMALIZATION
         // =====================================================
 
         private double NormalizePrice(
@@ -464,21 +544,28 @@ namespace cAlgo.Robots
         }
 
         // =====================================================
-        // STOP
+        // STOP BOT
         // =====================================================
 
         protected override void OnStop()
         {
             Timer.Stop();
 
-            Positions.Opened -= OnPositionOpened;
-            Positions.Closed -= OnPositionClosed;
+            Positions.Opened -=
+                OnPositionOpened;
 
-            if (CancelOrdersOnStop)
+            Positions.Closed -=
+                OnPositionClosed;
+
+            if (
+                CancelOrdersWhenBotStops
+            )
+            {
                 CancelAllPendingOrders();
+            }
 
             Print(
-                "XAUUSD HEDGE STOP REPEATER STOPPED"
+                "XAUUSD VIDEO LADDER BOT STOPPED"
             );
         }
     }
